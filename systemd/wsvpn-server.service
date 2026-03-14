@@ -1,0 +1,35 @@
+[Unit]
+Description=WSVPN Server - WebSocket VPN
+Documentation=https://github.com/ntcjoel/wsvpn
+After=network.target nginx.service
+Wants=nginx.service
+
+[Service]
+Type=simple
+User=sq
+Group=sq
+WorkingDirectory=/home/sq/wsvpn
+ExecStart=/home/sq/wsvpn/wsvpn-server
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=wsvpn-server
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/home/sq/wsvpn
+PrivateTmp=true
+
+# Capabilities (instead of root)
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=1024
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,48 @@
+# Binaries
+*.exe
+*.dll
+*.so
+*.dylib
+wsvpn-server
+wsvpn-client
+wsvpn-client.exe
+
+# Build artifacts
+build/
+bin/
+*.tar.gz
+
+# Certificates (keep private)
+*.pem
+*.key
+*.crt
+
+# Logs
+*.log
+logs/
+
+# Configuration with secrets
+config/server.json
+config/clients.json
+config/client.json
+config/client-windows.json
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test files
+*.pcap
+testfile-*
+
+# Temporary
+tmp/
+temp/
+*.tmp

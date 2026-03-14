@@ -1,0 +1,18 @@
+{
+  "clients": [
+    {
+      "uuid": "device-phone-001",
+      "ip": "10.9.1.2",
+      "name": "My-iPhone",
+      "enabled": true
+    },
+    {
+      "uuid": "device-laptop-002",
+      "ip": "10.9.1.3",
+      "name": "My-MacBook",
+      "enabled": true
+    }
+  ],
+  "network": "10.9.1.0/24",
+  "next_dynamic_ip": 50
+}

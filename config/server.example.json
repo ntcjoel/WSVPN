@@ -1,0 +1,11 @@
+{
+  "name": "wsvpn0",
+  "network": "10.9.1.0/24",
+  "server_ip": "10.9.1.1",
+  "listen_addr": ":8180",
+  "websocket_path": "/ws/",
+  "clients_file": "clients.json",
+  "log_level": "info",
+  "obfuscation": true,
+  "admin_token": "REPLACE_WITH_YOUR_32_CHAR_RANDOM_TOKEN"
+}

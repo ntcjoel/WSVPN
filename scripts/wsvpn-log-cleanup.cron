@@ -1,0 +1,4 @@
+# WSVPN Log Cleanup - Daily at 3 AM
+# Add to crontab with: sudo cp /etc/cron.d/wsvpn-log-cleanup /etc/cron.d/ && sudo chmod 644 /etc/cron.d/wsvpn-log-cleanup
+
+0 3 * * * root /home/sq/.openclaw/workspace/wsvpn/scripts/log-cleanup.sh >> /var/log/wsvpn/cleanup.log 2>&1
