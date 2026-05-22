@@ -5,5 +5,7 @@
   "uuid": "device-phone-001",
   "reconnect": true,
   "log_level": "info",
-  "obfuscation": true
+  "obfuscation": true,
+  "transport": "websocket",
+  "quic_sni": "your-domain.com"
 }

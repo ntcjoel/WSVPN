@@ -7,7 +7,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"runtime"
 	"strings"
@@ -45,7 +44,8 @@ type Config struct {
 	LogLevel    string `json:"log_level"`
 	LogDir      string `json:"log_dir"`
 	Obfuscation bool   `json:"obfuscation"`
-	Transport   string `json:"transport"` // websocket or quic
+	Transport   string `json:"transport"`   // websocket or quic
+	QUICSNI     string `json:"quic_sni"`    // SNI hostname for QUIC TLS (defaults to server hostname)
 }
 
 // Client represents the WSVPN client
@@ -171,6 +171,25 @@ func (c *Client) connect() error {
 	}
 }
 
+// getSNI returns the SNI hostname for QUIC, using config value
+// or falling back to the hostname extracted from ServerURL
+func (c *Client) getSNI() string {
+	if c.config.QUICSNI != "" {
+		return c.config.QUICSNI
+	}
+	// Derive from ServerURL: strip scheme and path
+	host := strings.TrimPrefix(c.config.ServerURL, "wss://")
+	host = strings.TrimPrefix(host, "ws://")
+	host = strings.TrimPrefix(host, "quic://")
+	if idx := strings.Index(host, "/"); idx != -1 {
+		host = host[:idx]
+	}
+	if idx := strings.Index(host, ":"); idx != -1 {
+		host = host[:idx]
+	}
+	return host
+}
+
 // connectQUIC establishes QUIC connection to server
 func (c *Client) connectQUIC() error {
 	// Parse server URL (quic://server:port or just server:port)
@@ -182,7 +201,7 @@ func (c *Client) connectQUIC() error {
 	}
 
 	tlsConfig := &tls.Config{
-		ServerName: "app.glidesky.org", // SNI for TLS
+		ServerName: c.getSNI(), // Resolved from config or derived from ServerURL
 		NextProtos: []string{"h3"},     // HTTP/3 protocol
 	}
 
@@ -232,7 +251,10 @@ func (c *Client) connectQUIC() error {
 		return fmt.Errorf("unauthorized UUID: %s", c.config.UUID)
 	}
 
-	structuredLog.Info("legacy", ""Connected via QUIC to %s, assigned IP: %s", serverAddr, serverIP)
+	structuredLog.Info("quic_connected", "Connected via QUIC", map[string]interface{}{
+		"server": serverAddr,
+		"ip":     serverIP,
+	})
 	return nil
 }
 
@@ -251,7 +273,9 @@ func (c *Client) forwardToServer() {
 		n, err := c.tunDevice.Read(buffer)
 		if err != nil {
 			if err != io.EOF && c.running {
-				structuredLog.Info("legacy", ""Failed to read from TUN: %v", err)
+				structuredLog.Error("tun_read", "Failed to read from TUN", map[string]interface{}{
+					"error": err.Error(),
+				})
 			}
 			return
 		}
@@ -269,12 +293,16 @@ func (c *Client) forwardToServer() {
 		// Send based on transport type
 		if c.config.Transport == "quic" {
 			if _, err := c.quicStream.Write(sendData); err != nil {
-				structuredLog.Info("legacy", ""Failed to write to QUIC stream: %v", err)
+				structuredLog.Error("quic_write", "Failed to write to QUIC stream", map[string]interface{}{
+					"error": err.Error(),
+				})
 				return
 			}
 		} else {
 			if err := c.conn.WriteMessage(websocket.BinaryMessage, sendData); err != nil {
-				structuredLog.Info("legacy", ""Failed to write to WebSocket: %v", err)
+				structuredLog.Error("ws_write", "Failed to write to WebSocket", map[string]interface{}{
+					"error": err.Error(),
+				})
 				return
 			}
 		}
@@ -299,7 +327,9 @@ func (c *Client) forwardFromWebSocket(buffer []byte) {
 		messageType, data, err := c.conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				structuredLog.Info("legacy", ""WebSocket error: %v", err)
+				structuredLog.Warn("ws_disconnect", "WebSocket disconnected unexpectedly", map[string]interface{}{
+					"error": err.Error(),
+				})
 			}
 			return
 		}
@@ -314,7 +344,9 @@ func (c *Client) forwardFromWebSocket(buffer []byte) {
 			var err error
 			packet, err = obfuscation.RemovePadding(data)
 			if err != nil {
-				structuredLog.Info("legacy", ""Failed to remove padding: %v", err)
+				structuredLog.Warn("obfuscation_remove", "Failed to remove padding from WebSocket data", map[string]interface{}{
+					"error": err.Error(),
+				})
 				continue
 			}
 		} else {
@@ -327,7 +359,9 @@ func (c *Client) forwardFromWebSocket(buffer []byte) {
 
 		// Write packet to TUN interface
 		if _, err := c.tunDevice.Write(packet); err != nil {
-			structuredLog.Info("legacy", ""Failed to write to TUN: %v", err)
+			structuredLog.Error("tun_write", "Failed to write to TUN (WebSocket)", map[string]interface{}{
+				"error": err.Error(),
+			})
 			return
 		}
 	}
@@ -338,7 +372,9 @@ func (c *Client) forwardFromQUIC(buffer []byte) {
 	for c.running {
 		n, err := c.quicStream.Read(buffer)
 		if err != nil {
-			structuredLog.Info("legacy", ""QUIC stream read error: %v", err)
+			structuredLog.Error("quic_read", "QUIC stream read error", map[string]interface{}{
+				"error": err.Error(),
+			})
 			return
 		}
 
@@ -348,7 +384,9 @@ func (c *Client) forwardFromQUIC(buffer []byte) {
 			var err error
 			packet, err = obfuscation.RemovePadding(buffer[:n])
 			if err != nil {
-				structuredLog.Info("legacy", ""Failed to remove padding: %v", err)
+				structuredLog.Warn("obfuscation_remove", "Failed to remove padding from QUIC data", map[string]interface{}{
+					"error": err.Error(),
+				})
 				continue
 			}
 		} else {
@@ -357,7 +395,9 @@ func (c *Client) forwardFromQUIC(buffer []byte) {
 
 		// Write packet to TUN interface
 		if _, err := c.tunDevice.Write(packet); err != nil {
-			structuredLog.Info("legacy", ""Failed to write to TUN: %v", err)
+			structuredLog.Error("tun_write", "Failed to write to TUN (QUIC)", map[string]interface{}{
+				"error": err.Error(),
+			})
 			return
 		}
 	}
@@ -369,11 +409,15 @@ func (c *Client) reconnect() {
 	maxBackoff := 30 * time.Second
 
 	for c.running {
-		structuredLog.Info("legacy", ""Attempting to reconnect in %v...", backoff)
+		structuredLog.Info("reconnect_wait", "Attempting to reconnect", map[string]interface{}{
+			"backoff": backoff.String(),
+		})
 		time.Sleep(backoff)
 
 		if err := c.connect(); err != nil {
-			structuredLog.Info("legacy", ""Reconnection failed: %v", err)
+			structuredLog.Warn("reconnect_fail", "Reconnection failed", map[string]interface{}{
+				"error": err.Error(),
+			})
 			backoff *= 2
 			if backoff > maxBackoff {
 				backoff = maxBackoff
@@ -383,7 +427,7 @@ func (c *Client) reconnect() {
 
 		// Reset backoff on successful connection
 		backoff = 1 * time.Second
-		structuredLog.Info("legacy", ""Reconnected successfully")
+		structuredLog.Info("reconnect_success", "Reconnected successfully", nil)
 
 		// Restart packet forwarding
 		go c.forwardToServer()
@@ -426,7 +470,9 @@ func (c *Client) irregularHeartbeat() {
 		select {
 		case <-time.After(interval):
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
-				structuredLog.Info("legacy", ""Ping failed: %v", err)
+				structuredLog.Warn("heartbeat_fail", "Ping failed", map[string]interface{}{
+					"error": err.Error(),
+				})
 				if c.config.Reconnect {
 					c.running = false
 					close(c.stopCh)
@@ -457,7 +503,7 @@ func (c *Client) stop() {
 	if c.tunDevice != nil {
 		c.tunDevice.Close()
 	}
-	structuredLog.Info("legacy", ""Client stopped")
+	structuredLog.Info("client_stopped", "Client stopped", nil)
 }
 
 func main() {

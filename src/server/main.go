@@ -25,18 +25,18 @@ const Version = "v0.4.9"
 
 // Config represents the server configuration
 type Config struct {
-	Name          string `json:"name"`
-	Network       string `json:"network"`
-	ServerIP      string `json:"server_ip"`
-	ListenAddr    string `json:"listen_addr"`
-	QUICListenAddr string `json:"quic_listen_addr"`
-	WebSocketPath string `json:"websocket_path"`
-	ClientsFile   string `json:"clients_file"`
-	LogLevel      string `json:"log_level"`
-	LogDir        string `json:"log_dir"`
-	Obfuscation   bool   `json:"obfuscation"`
-	AdminToken    string `json:"admin_token"`
-	Transport     string `json:"transport"` // websocket, quic, or both
+	Name            string `json:"name"`
+	Network         string `json:"network"`
+	ServerIP        string `json:"server_ip"`
+	ListenAddr      string `json:"listen_addr"`
+	QUICListenAddr  string `json:"quic_listen_addr"`
+	WebSocketPath   string `json:"websocket_path"`
+	ClientsFile     string `json:"clients_file"`
+	LogLevel        string `json:"log_level"`
+	LogDir          string `json:"log_dir"`
+	Obfuscation     bool   `json:"obfuscation"`
+	AdminToken      string `json:"admin_token"`
+	Transport       string `json:"transport"` // websocket, quic, or both
 }
 
 // Global structured logger instance (named differently to avoid conflict with stdlib log)
@@ -44,12 +44,13 @@ var structuredLog *logger.Logger
 
 // Client represents a connected VPN client
 type Client struct {
-	ID     string
-	Conn   *websocket.Conn
-	IP     net.IP
-	IPStr  string
-	UUID   string
-	stopCh chan struct{}
+	ID      string
+	Conn    *websocket.Conn
+	IP      net.IP
+	IPStr   string
+	UUID    string
+	stopCh  chan struct{}
+	writeMu sync.Mutex // protects Conn.WriteMessage from concurrent writes
 }
 
 // Server represents the WSVPN server
@@ -235,14 +236,17 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		"ip":        clientIP,
 	})
 
-	// Send client their assigned IP
+	// Send client their assigned IP (protected by write mutex)
+	client.writeMu.Lock()
 	if err := conn.WriteMessage(websocket.TextMessage, []byte(clientIP)); err != nil {
 		structuredLog.Error("client_ip_send", "Failed to send IP to client", map[string]interface{}{
 			"error": err.Error(),
 		})
 		conn.Close()
+		client.writeMu.Unlock()
 		return
 	}
+	client.writeMu.Unlock()
 
 	// Start bidirectional packet forwarding
 	go s.forwardToTUN(client)
@@ -378,9 +382,13 @@ func (s *Server) forwardToClient(client *Client) {
 			"client":  client.ID,
 		})
 
-		// Use O(1) route table lookup instead of iteration
+		// Hold clientsMu read lock while looking up and writing to targetClient.
+		// This prevents forwardToTUN's defer from removing the client between
+		// the lookup and the write.
+		s.clientsMu.RLock()
 		targetClient := s.routePacket(packet)
 		if targetClient == nil {
+			s.clientsMu.RUnlock()
 			structuredLog.Debug("route_miss", "No route for packet", map[string]interface{}{
 				"dst_ip": dstIP.String(),
 			})
@@ -404,84 +412,54 @@ func (s *Server) forwardToClient(client *Client) {
 		})
 
 		// Send packet to the target client (not necessarily the reader)
+		targetClient.writeMu.Lock()
 		if err := targetClient.Conn.WriteMessage(websocket.BinaryMessage, sendData); err != nil {
 			structuredLog.Debug("websocket_write", "Failed to write to WebSocket", map[string]interface{}{
 				"target":    targetClient.ID,
 				"error":     err.Error(),
 			})
+			targetClient.writeMu.Unlock()
+			s.clientsMu.RUnlock()
 			// Don't return here, continue processing other packets
+			continue
 		}
+		targetClient.writeMu.Unlock()
+		s.clientsMu.RUnlock()
 	}
 }
 
-// startServer starts the WebSocket server
-func (s *Server) startServer() error {
-	config := s.getConfig()
-
-	// Register WebSocket handler
-	http.HandleFunc("/ws/", s.handleWebSocket)
-
-	// Register health endpoint
-	http.HandleFunc("/ws/health", s.HandleHealth)
-
-	// Register config reload endpoint
-	http.HandleFunc("/ws/reload", s.HandleConfigReload)
-
-	structuredLog.Info("server_start", "Starting WebSocket server", map[string]interface{}{
-		"addr": config.ListenAddr,
-	})
-	if err := http.ListenAndServe(config.ListenAddr, nil); err != nil {
-		return fmt.Errorf("failed to start server: %w", err)
-	}
-
-	return nil
-}
-
-// setupSignalHandlers sets up SIGHUP handler for config hot reload
-func (s *Server) setupSignalHandlers() {
+// setupSignalHandlers sets up SIGHUP handler for config hot reload and graceful shutdown
+func setupSignalHandlers(ctx context.Context, cancel context.CancelFunc, clientManager *ClientManager) {
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGHUP)
+	signal.Notify(sigCh, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM)
 
 	go func() {
-		for range sigCh {
-			structuredLog.Info("config_reload", "Received SIGHUP, reloading configuration", nil)
-
-			// Load new configuration
-			newConfig, err := loadConfig("server.json")
-			if err != nil {
-				structuredLog.Error("config_reload", "Failed to reload config", map[string]interface{}{
-					"error": err.Error(),
+		for sig := range sigCh {
+			switch sig {
+			case syscall.SIGHUP:
+				structuredLog.Info("config_reload", "Received SIGHUP, reloading configuration", nil)
+				newConfig, err := loadConfig("server.json")
+				if err != nil {
+					structuredLog.Error("config_reload", "Failed to reload config", map[string]interface{}{
+						"error": err.Error(),
+					})
+					continue
+				}
+				if err := clientManager.Reload(newConfig.ClientsFile); err != nil {
+					structuredLog.Error("config_reload", "Failed to reload clients", map[string]interface{}{
+						"error": err.Error(),
+					})
+					continue
+				}
+				structuredLog.Info("config_reload", "Configuration reloaded successfully", map[string]interface{}{
+					"obfuscation": newConfig.Obfuscation,
+					"transport":   newConfig.Transport,
 				})
-				continue
+			case syscall.SIGINT, syscall.SIGTERM:
+				structuredLog.Info("server_shutdown", "Received shutdown signal", nil)
+				cancel()
 			}
-
-			// Update config atomically
-			s.setConfig(newConfig)
-
-			// Reload client manager
-			if err := s.clientManager.Reload(newConfig.ClientsFile); err != nil {
-				structuredLog.Error("config_reload", "Failed to reload clients", map[string]interface{}{
-					"error": err.Error(),
-				})
-				continue
-			}
-
-			structuredLog.Info("config_reload", "Configuration reloaded successfully", map[string]interface{}{
-				"obfuscation": newConfig.Obfuscation,
-			})
 		}
-	}()
-}
-
-// setupGracefulShutdown sets up graceful shutdown on SIGINT/SIGTERM
-func (s *Server) setupGracefulShutdown() {
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-
-	go func() {
-		<-sigCh
-		structuredLog.Info("server_shutdown", "Shutting down server", nil)
-		s.cancel()
 	}()
 }
 
@@ -552,8 +530,8 @@ func main() {
 		os.Exit(1)
 	}
 	structuredLog.Info("client_load", "Clients loaded", map[string]interface{}{
-		"count":  clientManager.GetClientCount(),
-		"file":   config.ClientsFile,
+		"count": clientManager.GetClientCount(),
+		"file":  config.ClientsFile,
 	})
 
 	// Initialize TUN interface (shared by both transports)
@@ -615,9 +593,9 @@ func main() {
 		}
 		go func() {
 			server := &Server{
-				clients:       make(map[string]*Client),
-				ipRoute:       make(map[string]string),
-				tunDevice:     ifce,
+				clients:   make(map[string]*Client),
+				ipRoute:   make(map[string]string),
+				tunDevice: ifce,
 				upgrader: websocket.Upgrader{
 					ReadBufferSize:  2048,
 					WriteBufferSize: 2048,
@@ -673,39 +651,4 @@ func main() {
 	// Block forever
 	<-ctx.Done()
 	structuredLog.Info("server_shutdown", "Server shutting down", nil)
-}
-
-// setupSignalHandlers sets up SIGHUP handler for config hot reload and graceful shutdown
-func setupSignalHandlers(ctx context.Context, cancel context.CancelFunc, clientManager *ClientManager) {
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM)
-
-	go func() {
-		for sig := range sigCh {
-			switch sig {
-			case syscall.SIGHUP:
-				structuredLog.Info("config_reload", "Received SIGHUP, reloading configuration", nil)
-				newConfig, err := loadConfig("server.json")
-				if err != nil {
-					structuredLog.Error("config_reload", "Failed to reload config", map[string]interface{}{
-						"error": err.Error(),
-					})
-					continue
-				}
-				if err := clientManager.Reload(newConfig.ClientsFile); err != nil {
-					structuredLog.Error("config_reload", "Failed to reload clients", map[string]interface{}{
-						"error": err.Error(),
-					})
-					continue
-				}
-				structuredLog.Info("config_reload", "Configuration reloaded successfully", map[string]interface{}{
-					"obfuscation": newConfig.Obfuscation,
-					"transport":   newConfig.Transport,
-				})
-			case syscall.SIGINT, syscall.SIGTERM:
-				structuredLog.Info("server_shutdown", "Received shutdown signal", nil)
-				cancel()
-			}
-		}
-	}()
 }

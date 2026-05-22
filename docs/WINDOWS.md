@@ -30,14 +30,15 @@ Edit `config/client-windows.json`:
 
 ```json
 {
-  "name": "WSVPN",           // TUN interface name
-  "client_ip": "10.9.1.2",   // Assigned VPN IP
+  "name": "WSVPN",              // TUN interface name
+  "client_ip": "10.9.1.2",     // Assigned VPN IP
   "server_url": "wss://your-server.com",
-  "uuid": "your-uuid-here",  // Authentication UUID
-  "reconnect": true,         // Auto-reconnect on disconnect
-  "log_level": "info",       // debug, info, warn, error
-  "obfuscation": true,       // Traffic obfuscation
-  "transport": "websocket"   // websocket or quic
+  "uuid": "your-uuid-here",    // Authentication UUID
+  "reconnect": true,           // Auto-reconnect on disconnect
+  "log_level": "info",         // debug, info, warn, error
+  "obfuscation": true,         // Traffic obfuscation
+  "transport": "websocket",     // websocket or quic
+  "quic_sni": ""               // QUIC TLS SNI (defaults to server_url hostname)
 }
 ```
 
