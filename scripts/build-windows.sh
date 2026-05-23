@@ -1,6 +1,8 @@
 #!/bin/bash
 # Build Windows CLI client for WSVPN
-# Usage: ./build-windows.sh
+# Usage: ./build-windows.sh [--update-deps]
+#
+# --update-deps  Automatically update external dependencies to latest before building
 
 set -e
 
@@ -14,11 +16,31 @@ echo "Project Root: $PROJECT_ROOT"
 echo "Source: $SRC_DIR"
 echo "Output: $BUILD_DIR"
 
+# Check for --update-deps flag
+UPDATE_DEPS=false
+for arg in "$@"; do
+    case "$arg" in
+        --update-deps|-u)
+            UPDATE_DEPS=true
+            ;;
+    esac
+done
+
 # Create build directory
 mkdir -p "$BUILD_DIR"
 
 # Change to src directory for proper module resolution
 cd "$PROJECT_ROOT/src"
+
+# Update dependencies if requested
+if $UPDATE_DEPS; then
+    echo "Updating external dependencies to latest..."
+    go get -u github.com/refraction-networking/utls@latest
+    go get -u github.com/gorilla/websocket@latest
+    go get -u github.com/quic-go/quic-go@latest
+    go mod tidy -v
+    echo "Dependencies updated"
+fi
 
 # Check if cross-compiling or native
 if [[ "$(go env GOOS)" == "windows" ]]; then
@@ -33,13 +55,19 @@ fi
 echo "Copying Wintun drivers..."
 mkdir -p "$BUILD_DIR/drivers/wintun/amd64"
 mkdir -p "$BUILD_DIR/drivers/wintun/arm64"
-cp "$PROJECT_ROOT/drivers/wintun/amd64/wintun.dll" "$BUILD_DIR/drivers/wintun/amd64/"
-cp "$PROJECT_ROOT/drivers/wintun/arm64/wintun.dll" "$BUILD_DIR/drivers/wintun/arm64/"
+
+# Copy wintun DLLs if they exist in the project tree
+if [ -f "$PROJECT_ROOT/drivers/wintun/amd64/wintun.dll" ]; then
+    cp "$PROJECT_ROOT/drivers/wintun/amd64/wintun.dll" "$BUILD_DIR/drivers/wintun/amd64/"
+fi
+if [ -f "$PROJECT_ROOT/drivers/wintun/arm64/wintun.dll" ]; then
+    cp "$PROJECT_ROOT/drivers/wintun/arm64/wintun.dll" "$BUILD_DIR/drivers/wintun/arm64/"
+fi
 
 # Copy config
 echo "Copying configuration..."
 mkdir -p "$BUILD_DIR/config"
-cp "$PROJECT_ROOT/config/client-windows.json" "$BUILD_DIR/config/"
+cp "$PROJECT_ROOT/config/client-windows.json" "$BUILD_DIR/config/" 2>/dev/null || true
 
 echo ""
 echo "=== Build Complete ==="

@@ -21,22 +21,23 @@ import (
 	"wsvpn/obfuscation"
 )
 
-const Version = "v0.4.9"
+const Version = "v1.0"
 
 // Config represents the server configuration
 type Config struct {
-	Name            string `json:"name"`
-	Network         string `json:"network"`
-	ServerIP        string `json:"server_ip"`
-	ListenAddr      string `json:"listen_addr"`
-	QUICListenAddr  string `json:"quic_listen_addr"`
-	WebSocketPath   string `json:"websocket_path"`
-	ClientsFile     string `json:"clients_file"`
-	LogLevel        string `json:"log_level"`
-	LogDir          string `json:"log_dir"`
-	Obfuscation     bool   `json:"obfuscation"`
-	AdminToken      string `json:"admin_token"`
-	Transport       string `json:"transport"` // websocket, quic, or both
+	Name                     string `json:"name"`
+	Network                  string `json:"network"`
+	ServerIP                 string `json:"server_ip"`
+	ListenAddr               string `json:"listen_addr"`
+	QUICListenAddr           string `json:"quic_listen_addr"`
+	WebSocketPath            string `json:"websocket_path"`
+	ClientsFile              string `json:"clients_file"`
+	LogLevel                 string `json:"log_level"`
+	LogDir                   string `json:"log_dir"`
+	Obfuscation              bool   `json:"obfuscation"`
+	AdminToken               string `json:"admin_token"`
+	Transport                string `json:"transport"`                  // websocket, quic, or both
+	ObfuscationVersionDefault int  `json:"obfuscation_version_default"` // default obfuscation version (1 or 2)
 }
 
 // Global structured logger instance (named differently to avoid conflict with stdlib log)
@@ -44,13 +45,14 @@ var structuredLog *logger.Logger
 
 // Client represents a connected VPN client
 type Client struct {
-	ID      string
-	Conn    *websocket.Conn
-	IP      net.IP
-	IPStr   string
-	UUID    string
-	stopCh  chan struct{}
-	writeMu sync.Mutex // protects Conn.WriteMessage from concurrent writes
+	ID                 string
+	Conn               *websocket.Conn
+	IP                 net.IP
+	IPStr              string
+	UUID               string
+	stopCh             chan struct{}
+	writeMu            sync.Mutex // protects Conn.WriteMessage from concurrent writes
+	ObfuscationVersion int       // 1 or 2, extracted from WebSocket query param
 }
 
 // Server represents the WSVPN server
@@ -199,6 +201,18 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Extract obfuscation version from query param (e.g., ?ov=2)
+	config := s.getConfig()
+	ov := config.ObfuscationVersionDefault
+	if ov == 0 {
+		ov = obfuscation.ObfuscationVersion1
+	}
+	if ovStr := r.URL.Query().Get("ov"); ovStr != "" {
+		if ovStr == "2" {
+			ov = obfuscation.ObfuscationVersion2
+		}
+	}
+
 	// Upgrade WebSocket connection
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -217,6 +231,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		IPStr:  clientIP,
 		UUID:   uuid,
 		stopCh: make(chan struct{}),
+		ObfuscationVersion: ov,
 	}
 
 	// Register client
@@ -314,7 +329,7 @@ func (s *Server) forwardToTUN(client *Client) {
 		var packet []byte
 		config := s.getConfig()
 		if config.Obfuscation {
-			packet, err = obfuscation.RemovePadding(data)
+			packet, err = obfuscation.RemovePaddingVersion(data, client.ObfuscationVersion)
 			if err != nil {
 				structuredLog.Warn("obfuscation_remove", "Failed to remove padding", map[string]interface{}{
 					"client_id": client.ID,
@@ -399,7 +414,7 @@ func (s *Server) forwardToClient(client *Client) {
 		config := s.getConfig()
 		sendData := packet
 		if config.Obfuscation {
-			sendData = obfuscation.SimulateHTTPSPattern(packet)
+			sendData = obfuscation.SimulateHTTPSPatternVersion(packet, targetClient.ObfuscationVersion)
 		}
 
 		// Record outbound traffic

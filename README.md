@@ -1,120 +1,124 @@
 # WSVPN - WebSocket VPN
 
-**Version:** v0.4.9  
+**Version:** v1.0  
 **Status:** Production Ready ✅  
 **License:** MIT License
 
-[![Release](https://img.shields.io/badge/release-v0.4.9-blue.svg)](https://github.com/ntcjoel/wsvpn/releases)
+[![Release](https://img.shields.io/badge/release-v1.0-blue.svg)](https://github.com/ntcjoel/wsvpn/releases)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows-lightgrey.svg)](https://github.com/ntcjoel/wsvpn)
 [![Go Version](https://img.shields.io/badge/go-1.21+-00ADD8.svg)](https://golang.org)
 
 ---
 
-## 🚀 Overview
+## Overview
 
-WSVPN is a lightweight, high-performance WebSocket-based VPN designed for personal and small-team use. It provides secure remote network access through a simple WebSocket tunnel with minimal overhead and advanced traffic obfuscation.
+WSVPN is a lightweight, high-performance WebSocket-based VPN designed for personal and small-team use. It provides secure remote network access through a standard WebSocket-over-TLS (WSS) tunnel with **advanced anti-DPI obfuscation** to resist deep packet inspection and censorship detection.
 
-### ✨ Key Features
+### Key Features
 
-- **WebSocket Tunnel**: Full-duplex communication over standard WebSocket protocol (WSS)
+- **WebSocket Tunnel**: Full-duplex communication over standard WSS (WebSocket + TLS 1.3)
+- **TLS Fingerprint Camouflage**: Mimics Chrome/Firefox/iOS browser TLS handshakes via uTLS — defeats JA3/JA4 fingerprint-based detection
+- **Traffic Shaping**: Browse-mode burst/pause cycles simulate real human browsing patterns — eliminates continuous-stream VPN signatures
+- **Obfuscation v2**: Double-randomized packet header format prevents fixed-pattern DPI fingerprinting
 - **UUID Authentication**: Simple device-based authentication via unique identifiers
 - **Multi-Client Support**: Static IP allocation per registered device
-- **Traffic Obfuscation**: HTTPS pattern simulation, adaptive padding, timing jitter
-- **Health Monitoring**: Real-time metrics and status endpoint
 - **Config Hot Reload**: Update configuration without service restart (SIGHUP or HTTP API)
-- **HTTPS Compatible**: Works seamlessly with standard HTTPS reverse proxies (Nginx, Caddy)
-- **Lightweight**: Single binary deployment, <10MB memory footprint
-- **Cross-Platform**: Linux server/client + Windows CLI client (Wintun driver)
 - **Auto-Reconnect**: Exponential backoff reconnection on network failure
+- **HTTPS Compatible**: Works seamlessly behind standard HTTPS reverse proxies (Nginx, Caddy)
+- **Lightweight**: Single binary deployment, <12MB memory footprint
+- **Cross-Platform**: Linux server/client + Windows CLI client (Wintun driver)
 
-### 🏗️ Architecture
+---
+
+## Anti-DPI Design
+
+WSVPN v1.0 incorporates three layers of traffic obfuscation specifically designed to resist GFW/censorship deep packet inspection:
+
+### Layer 1 — TLS Fingerprint Camouflage
+Go's default `crypto/tls` produces a distinctive JA3/JA4 fingerprint that immediately identifies the client as a Go program (not a browser). WSVPN uses `refraction-networking/utls` to mimic real browser TLS ClientHello messages:
+
+| Fingerprint | Description |
+|-------------|-------------|
+| `chrome` (default) | Mimics Google Chrome's TLS handshake |
+| `firefox` | Mimics Mozilla Firefox's TLS handshake |
+| `ios` | Mimics iOS Safari's TLS handshake |
+| `edge` | Mimics Microsoft Edge's TLS handshake |
+| `random` | Randomly selects from the above on each connection |
+
+### Layer 2 — Traffic Shaping
+Continuous bidirectional high-throughput is a definitive VPN signature. WSVPN implements a burst/pause state machine that mimics human browsing:
+
+| Mode | Behavior |
+|------|----------|
+| `off` | No shaping (raw throughput) |
+| `jitter` | Per-packet random delay (100ms–2s) |
+| `browse` | Burst (10–50 packets) → 30% chance of 2–8s pause — simulates reading/thinking |
+| `adaptive` | Reserved for future ML-driven pattern learning |
+
+Paused packets are buffered and sent in goroutines — TUN reads are never blocked.
+
+### Layer 3 — Randomized Obfuscation Header (v2)
+The original v1 format `[uint32_be(len)][payload][padding]` has a detectable fixed 2-byte prefix of `0x00 0x00` (since VPN MTU ≤ 1500, always ≤ 0x05DC). The v2 format `[uint16_be(len)][uint16_be(random)][payload][padding]` replaces this with crypto-random bytes — every packet header looks different.
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│  Client Device                                                  │
-│    ┌─────────────┐                                             │
-│    │ Application │  (Browser, App, etc.)                       │
-│    └──────┬──────┘                                             │
-│           ↓                                                     │
-│    ┌─────────────┐                                             │
-│    │ TUN Device  │  (wsvpn-client, 10.9.1.x/24)                │
-│    └──────┬──────┘                                             │
-│           ↓                                                     │
-│    ┌─────────────────────────────────────────┐                 │
-│    │ Obfuscation Layer                       │                 │
-│    │ - Random Padding (50-500 bytes)         │                 │
-│    │ - HTTPS Pattern Simulation              │                 │
-│    │ - Timing Jitter (100ms-2s)              │                 │
-│    └─────────────────────────────────────────┘                 │
-│           ↓                                                     │
-│    ┌─────────────┐                                             │
-│    │ TLS (HTTPS) │  wss://your-domain.com/ws/{uuid}           │
-│    └──────┬──────┘                                             │
-└───────────┼─────────────────────────────────────────────────────┘
-            │
-            │  Internet (Encrypted TLS)
-            ↓
-┌─────────────────────────────────────────────────────────────────┐
-│  Nginx Reverse Proxy (your-domain.com:443)                      │
-│    ┌─────────────────────────────────────────┐                 │
-│    │ TLS Termination                         │                 │
-│    └─────────────────────────────────────────┘                 │
-│           ↓                                                     │
-│    ┌─────────────────────────────────────────┐                 │
-│    │ WebSocket Proxy /ws/{uuid} → :8180      │                 │
-│    └─────────────────────────────────────────┘                 │
-└───────────┼─────────────────────────────────────────────────────┘
-            │
-            ↓
-┌─────────────────────────────────────────────────────────────────┐
-│  WSVPN Server (:8180)                                           │
-│    ┌─────────────────────────────────────────┐                 │
-│    │ UUID Authentication                     │                 │
-│    └─────────────────────────────────────────┘                 │
-│           ↓                                                     │
-│    ┌─────────────────────────────────────────┐                 │
-│    │ Remove Obfuscation                      │                 │
-│    └─────────────────────────────────────────┘                 │
-│           ↓                                                     │
-│    ┌─────────────┐                                             │
-│    │ TUN Device  │  (wsvpn0, 10.9.1.1/24)                      │
-│    └──────┬──────┘                                             │
-│           ↓                                                     │
-│    ┌─────────────┐                                             │
-│    │ Internet    │  (Route to destination)                     │
-│    └─────────────┘                                             │
-└─────────────────────────────────────────────────────────────────┘
+v1: [00 00 03 28][payload...][padding...]     ← detectable: bytes 0-1 always 0x00 0x00
+v2: [03 28 a7 f1][payload...][padding...]     ← undetectable: bytes 2-3 are crypto-random
+```
+
+The client signals its obfuscation version via URL query parameter (`?ov=2`), so the server supports mixed v1/v2 clients simultaneously.
+
+---
+
+## Architecture
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│  Client Device                                                 │
+│         ┌─────────────┐                                       │
+│         │ Application │  (Browser, App, etc.)                  │
+│         └──────┬──────┘                                       │
+│                ↓                                               │
+│         ┌─────────────┐                                       │
+│         │ TUN Device  │  (wsvpn-client, 10.9.1.x/24)          │
+│         └──────┬──────┘                                       │
+│                ↓                                               │
+│  ┌──────────────────────────────────────────────────────────┐ │
+│  │ Anti-DPI Layers (client-side)                            │ │
+│  │ 1. Obfuscation v2: randomized header + HTTPS-sized pad   │ │
+│  │ 2. Traffic Shaping: burst/pause browsing simulation      │ │
+│  └──────────────────────────────────────────────────────────┘ │
+│                ↓                                               │
+│  ┌──────────────────────────────────────────────────────────┐ │
+│  │ TLS Fingerprint Camouflage (uTLS → Chrome/Firefox JA3)   │ │
+│  └──────────────────────────────────────────────────────────┘ │
+│                ↓                                               │
+│         wss://your-domain.com/ws/{uuid}?ov=2                  │
+└─────────────────┼─────────────────────────────────────────────┘
+                  │
+                  │  Internet (Encrypted — invisible to DPI)
+                  ↓
+┌────────────────────────────────────────────────────────────────┐
+│  Nginx Reverse Proxy (your-domain.com:443)                     │
+│    TLS Termination → WebSocket Upgrade → proxy to :8180        │
+└─────────────────┼─────────────────────────────────────────────┘
+                  │
+                  ↓
+┌────────────────────────────────────────────────────────────────┐
+│  WSVPN Server (:8180)                                          │
+│    UUID Auth → Remove Obfuscation → TUN (wsvpn0, 10.9.1.1/24) │
+│    Route Table (O(1)) → Internet                               │
+└────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 📦 Pre-built Binaries
-
-Download pre-compiled binaries from the [Releases page](https://github.com/ntcjoel/wsvpn/releases):
-
-| Platform | Binary | Size |
-|----------|--------|------|
-| **Linux Server** | `wsvpn-server` | ~9.5 MB |
-| **Linux Client** | `wsvpn-client` | ~10.5 MB |
-| **Windows Client** | `wsvpn-client.exe` | ~10.4 MB |
-
-### Verify Checksums
-
-```bash
-# SHA256 checksums are provided in each release
-sha256sum wsvpn-server
-sha256sum wsvpn-client
-```
-
----
-
-## 🚀 Quick Start
+## Quick Start
 
 ### Prerequisites
 
-- **Server**: Linux with TUN/TAP support, Go 1.21+ (for building), Nginx (for HTTPS)
-- **Client**: Linux/Windows with TUN/TAP or Wintun support
-- **Capabilities**: `CAP_NET_ADMIN` (or root access)
+- **Server**: Linux with TUN/TAP support, Go 1.21+, Nginx (for HTTPS)
+- **Client**: Linux/Windows with TUN/TAP or Wintun driver
+- **Capabilities**: `CAP_NET_ADMIN` (or root)
 - **SSL Certificate**: For HTTPS termination (Let's Encrypt recommended)
 
 ### Build from Source
@@ -122,8 +126,15 @@ sha256sum wsvpn-client
 ```bash
 git clone https://github.com/ntcjoel/wsvpn.git
 cd wsvpn
-./scripts/build.sh all
+
+# Build with latest dependencies (recommended)
+./scripts/build.sh all --update-deps
+
+# Build Windows client
+./scripts/build-windows.sh --update-deps
 ```
+
+The `--update-deps` flag automatically pulls the latest versions of uTLS, gorilla/websocket, and quic-go — keeping TLS fingerprints current with browser updates.
 
 ### Server Deployment
 
@@ -138,40 +149,30 @@ ssh user@your-server "sudo setcap cap_net_admin+ep ~/wsvpn/wsvpn-server"
 
 # 3. Start server
 ssh user@your-server "cd ~/wsvpn && nohup ./wsvpn-server > server.log 2>&1 &"
-
-# 4. (Optional) Install systemd service
-sudo cp systemd/wsvpn-server.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable wsvpn-server
-sudo systemctl start wsvpn-server
 ```
 
 ### Client Deployment
 
 ```bash
-# 1. Copy binary and config to client
-scp build/wsvpn-client user@client-machine:~/wsvpn-client/
-scp config/client.json user@client-machine:~/wsvpn-client/
+# Linux
+scp build/wsvpn-client user@client:~/wsvpn-client/
+scp config/client.json user@client:~/wsvpn-client/
 
-# 2. Set capabilities
-ssh user@client-machine "sudo setcap cap_net_admin+ep ~/wsvpn-client/wsvpn-client"
-
-# 3. Start client
-ssh user@client-machine "cd ~/wsvpn-client && nohup ./wsvpn-client > client.log 2>&1 &"
+# Windows — copy entire build/ directory
+# Run: wsvpn-client.exe connect --config config/client.json
 ```
 
 ### Verify Connection
 
 ```bash
-# From client machine
 ping 10.9.1.1
 ```
 
 ---
 
-## 🔧 Configuration
+## Configuration
 
-### Server Configuration (`server.json`)
+### Server (`server.json`)
 
 ```json
 {
@@ -183,34 +184,18 @@ ping 10.9.1.1
   "clients_file": "clients.json",
   "log_level": "info",
   "obfuscation": true,
+  "obfuscation_version_default": 1,
   "admin_token": "your-32-char-random-token-here"
 }
 ```
 
-### Clients Configuration (`clients.json`)
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `obfuscation` | bool | `true` | Enable/disable packet obfuscation |
+| `obfuscation_version_default` | int | `1` | Default obfuscation version for clients not specifying `?ov=` |
+| `admin_token` | string | — | Token for health/reload API endpoints |
 
-```json
-{
-  "clients": [
-    {
-      "uuid": "device-phone-001",
-      "ip": "10.9.1.2",
-      "name": "My-iPhone",
-      "enabled": true
-    },
-    {
-      "uuid": "device-laptop-002",
-      "ip": "10.9.1.3",
-      "name": "My-MacBook",
-      "enabled": true
-    }
-  ],
-  "network": "10.9.1.0/24",
-  "next_dynamic_ip": 50
-}
-```
-
-### Client Configuration (`client.json`)
+### Client (`client.json`)
 
 ```json
 {
@@ -220,7 +205,37 @@ ping 10.9.1.1
   "uuid": "device-phone-001",
   "reconnect": true,
   "log_level": "info",
-  "obfuscation": true
+  "obfuscation": true,
+  "transport": "websocket",
+  "obfuscation_version": 2,
+  "tls_fingerprint": "chrome",
+  "traffic_shape": "browse",
+  "quic_sni": "your-domain.com"
+}
+```
+
+Anti-DPI fields:
+
+| Field | Type | Default | Values |
+|-------|------|---------|--------|
+| `obfuscation_version` | int | `1` | `1` = legacy header, `2` = randomized header |
+| `tls_fingerprint` | string | `"chrome"` | `chrome`, `firefox`, `ios`, `edge`, `random` |
+| `traffic_shape` | string | `"off"` | `off`, `jitter`, `browse`, `adaptive` |
+
+### Clients (`clients.json`)
+
+```json
+{
+  "clients": [
+    {
+      "uuid": "device-phone-001",
+      "ip": "10.9.1.2",
+      "name": "My-iPhone",
+      "enabled": true
+    }
+  ],
+  "network": "10.9.1.0/24",
+  "next_dynamic_ip": 50
 }
 ```
 
@@ -231,9 +246,10 @@ server {
     listen 443 ssl http2;
     server_name your-domain.com;
 
-    ssl_certificate /etc/letsencrypt/live/your-domain.com/fullchain.pem;
+    ssl_certificate     /etc/letsencrypt/live/your-domain.com/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/your-domain.com/privkey.pem;
 
+    # WebSocket proxy — preserves UUID and ?ov= query param
     location ~ "^/ws/([a-zA-Z0-9_-]{8,64})$" {
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
@@ -248,12 +264,18 @@ server {
         proxy_http_version 1.1;
         proxy_set_header Host $host;
     }
+
+    location /ws/reload {
+        proxy_pass http://127.0.0.1:8180/ws/reload;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+    }
 }
 ```
 
 ---
 
-## 📊 Monitoring & Operations
+## Monitoring
 
 ### Health Endpoint
 
@@ -261,251 +283,164 @@ server {
 curl "https://your-domain.com/ws/health?token=your-admin-token"
 ```
 
-**Response:**
 ```json
 {
   "status": "healthy",
   "uptime": "2h30m15s",
-  "start_time": "2026-03-03T10:00:00Z",
-  "clients": {
-    "connected": 2,
-    "configured": 2,
-    "client_details": [
-      {"id": "client-device-phone-001", "ip": "10.9.1.2"}
-    ]
-  },
-  "traffic": {
-    "bytes_in": 1048576,
-    "bytes_out": 2097152,
-    "packets_in": 1000,
-    "packets_out": 2000
-  },
-  "system": {
-    "goroutines": 15,
-    "memory_alloc_bytes": 5242880,
-    "cpus": 4,
-    "go_version": "go1.24.4"
-  }
+  "clients": {"connected": 2, "configured": 2},
+  "traffic": {"bytes_in": 1048576, "bytes_out": 2097152},
+  "system": {"goroutines": 8, "memory_alloc_bytes": 5242880}
 }
 ```
 
 ### Config Hot Reload
 
-**Via SIGHUP:**
 ```bash
 kill -SIGHUP $(pgrep wsvpn-server)
-```
-
-**Via HTTP API:**
-```bash
+# or
 curl -X POST "https://your-domain.com/ws/reload?token=your-admin-token"
-```
-
-### Check Version
-
-```bash
-./wsvpn-server -version
-./wsvpn-client -version
 ```
 
 ---
 
-## 📈 Performance
+## Performance
 
-### Test Results (v0.4.9)
+### v1.0 Test Results
 
-| Test Type | Configuration | Result |
-|-----------|---------------|--------|
-| **ICMP (64 bytes)** | Cross-machine | 0% loss, RTT ~143ms |
-| **ICMP (1472 bytes)** | Cross-machine | 0% loss, RTT ~143ms |
-| **Stability Test** | 24 hours | 0% loss, 0 disconnects ✅ |
-| **Throughput** | TCP iperf3 | ~50-85 Mbps |
+| Test | Configuration | Result |
+|------|---------------|--------|
+| ICMP (64B) | Cross-machine, v2 obfuscation + uTLS + browse shape | 0% loss, RTT ~138–187ms |
+| TCP Throughput | iperf3, v2 obfuscation + uTLS | 39.4 Mbps, 0 retransmissions |
+| 50MB Download | HTTP through tunnel, browse shaping | ~28 Mbps avg |
 
 ### Resource Usage
 
 | Metric | Value |
 |--------|-------|
-| **Memory** | <10 MB per server instance |
-| **CPU** | <5% on single-core for 10 clients |
-| **Goroutines** | ~6 base + 2 per client |
-| **Binary Size** | ~10 MB (Linux), ~10.4 MB (Windows) |
+| Memory | <12 MB per server/client instance |
+| CPU | <5% on single-core for 10 clients |
+| Binary Size | ~12 MB (Linux), ~12.4 MB (Windows) |
 
 ---
 
-## 🔒 Security
+## Keeping Dependencies Current
 
-### Authentication
+WSVPN's anti-DPI effectiveness depends on keeping uTLS fingerprints current with browser updates. Rebuild with:
 
-- **UUID-based**: Each device has a unique UUID (min 8 chars) in WebSocket path
-- **Static IP Mapping**: Pre-defined UUID → IP assignment in `clients.json`
-- **Unauthorized Rejection**: Unknown UUIDs receive HTTP 401
+```bash
+# Update all dependencies and rebuild
+./scripts/build.sh all --update-deps
+./scripts/build-windows.sh --update-deps
+```
 
-### Encryption
-
-- **TLS 1.2/1.3**: Industry-standard encryption via Nginx/Let's Encrypt
-- **Certificate Validation**: Client validates server certificate
-- **No Inner Encryption**: VPN payload encrypted by TLS (no TLS-in-TLS overhead)
-
-### Traffic Obfuscation
-
-- **Adaptive Packet Sizing**: Dynamic packet size adjustment (64/256/1024/1480 bytes)
-- **Random Padding**: 50-500 bytes per packet
-- **Timing Jitter**: 100ms-2s random delays
-- **HTTPS Pattern Simulation**: Mimics normal HTTPS traffic patterns
-
-### Security Best Practices
-
-1. **Use strong UUIDs**: Minimum 16 characters, alphanumeric + special chars
-2. **Protect admin_token**: Keep secret, rotate periodically, use 32+ chars
-3. **Enable obfuscation**: Always use in production (unless debugging)
-4. **Monitor logs**: Watch for unauthorized connection attempts
-5. **Limit exposure**: Firewall restrict access to server port
-6. **Use HTTPS**: Never expose WebSocket without TLS termination
+This pulls the latest uTLS (browser TLS fingerprints), gorilla/websocket, and quic-go. Add `--update-deps` to your CI/CD pipeline or set up a cron job to rebuild periodically.
 
 ---
 
-## 🛠️ Troubleshooting
+## Security
+
+### Defense Layers
+
+| Layer | Purpose | Mechanism |
+|-------|---------|-----------|
+| TLS 1.3 | Encryption (confidentiality) | Nginx + Let's Encrypt |
+| TLS Fingerprint | JA3/JA4 evasion | uTLS Chrome/Firefox simulation |
+| Traffic Shaping | Flow-pattern evasion | Burst/pause browsing simulation |
+| Obfuscation v2 | Packet-pattern evasion | Randomized header + HTTPS-sized padding |
+| UUID Auth | Access control | Path-based UUID in WebSocket URL |
+
+### Best Practices
+
+1. Use strong UUIDs (16+ characters, alphanumeric + special chars)
+2. Protect `admin_token` — keep secret, rotate periodically
+3. Enable obfuscation + v2 header + browse shaping in production
+4. Rebuild with `--update-deps` monthly to keep TLS fingerprints current
+5. Use HTTPS with valid certificate — never expose plain WebSocket
+
+---
+
+## Troubleshooting
 
 ### Common Issues
 
-**1. "Failed to create TUN interface: ioctl: operation not permitted"**
+**1. "Failed to create TUN interface: operation not permitted"**
 ```bash
-# Solution: Set capabilities
 sudo setcap cap_net_admin+ep ./wsvpn-server
-# Or run as root (not recommended for production)
-sudo ./wsvpn-server
 ```
 
 **2. "Address already in use"**
 ```bash
-# Solution: Kill existing process
 pkill -9 -f wsvpn-server
-# Or change port in server.json
 ```
 
 **3. "WebSocket handshake failed"**
 ```bash
-# Check Nginx configuration
-sudo nginx -t
-sudo nginx -s reload
-
-# Verify SSL certificate
+# Verify nginx proxy and SSL certificate
+sudo nginx -t && sudo nginx -s reload
 openssl s_client -connect your-domain.com:443
 ```
 
 **4. "Unauthorized UUID"**
 ```bash
-# Add UUID to clients.json
-# Restart or hot-reload server
+# Add UUID to clients.json, then reload
+kill -SIGHUP $(pgrep wsvpn-server)
 ```
 
-**5. "100% packet loss"**
+**5. DNS resolution failure on Windows**
 ```bash
-# Check TUN interface
-ip addr show wsvpn0
-
-# Check routing
-ip route show
-
-# Check server logs
-tail -f ~/wsvpn/server.log
-```
-
-### Clean Old Interfaces
-
-```bash
-# Server side
-sudo ip link delete wsvpn0 2>/dev/null
-
-# Client side (Linux)
-sudo ip link delete wsvpn-client 2>/dev/null
-
-# Client side (Windows)
-# Reboot or use: pnputil /remove-device <device-id>
+ipconfig /flushdns
 ```
 
 ---
 
-## 📝 Version History
+## Version History
 
-### v0.4.9 (2026-03-07) - Comprehensive Stability Release
-- ✅ WebSocket mutex protection (prevents concurrent write panic)
-- ✅ Error channel buffer (prevents goroutine leak)
-- ✅ Unified version constants across all components
-- ✅ 24h stability test: 0% packet loss, 0 disconnects
+### v1.0 (2026-05-24) — Anti-DPI Production Release
+- **TLS Fingerprint Camouflage**: uTLS integration — mimics Chrome/Firefox/iOS/Edge browser JA3/JA4 fingerprints
+- **Traffic Shaping**: Burst/pause state machine simulates human browsing patterns — eliminates continuous-stream VPN signature
+- **Obfuscation v2**: Double-randomized 2+2-byte header format — defeats DPI fixed-pattern detection
+- **Auto-dependency updates**: `--update-deps` build flag keeps uTLS fingerprints current
+- **Configurable anti-DPI**: `tls_fingerprint`, `traffic_shape`, `obfuscation_version` client config fields
+- **Per-client obfuscation version**: Server supports mixed v1/v2 clients via `?ov=` URL query parameter
 
-### v0.4.6 (2026-03-06) - Dual Transport + CLI Flags
-- ✅ WebSocket + QUIC dual transport support
-- ✅ Command-line flags (`-config`, `-clients`, `-version`)
-- ✅ Enhanced error recovery
+### v0.4.9 (2026-03-07) — Stability Release
+- WebSocket mutex protection (prevents concurrent write panic)
+- Error channel buffer (prevents goroutine leak)
+- 24h stability test: 0% packet loss, 0 disconnects
 
-### v0.4.5 (2026-03-06) - Route & Cleanup Fixes
-- ✅ Temporary routes (no permanent route pollution)
-- ✅ Route cleanup on disconnect
+### v0.4.6 (2026-03-06) — Dual Transport
+- WebSocket + QUIC dual transport support
+- Command-line flags (`-config`, `-clients`, `-version`)
 
-### v0.4.4 (2026-03-06) - Security Fix
-- ✅ Constant-time comparison for admin token (timing attack prevention)
-
-### v0.4.2 (2026-03-06) - Critical Stability Fixes
-- ✅ WebSocket mutex protection
-- ✅ Routing loop prevention
-- ✅ Goroutine leak fix
-- ✅ Auto-reconnect mechanism
-
-### v0.3.0 (2026-03-03) - Production Ready
-- ✅ Multi-client support with UUID authentication
-- ✅ Health monitoring endpoint
-- ✅ Config hot reload
-- ✅ Traffic metrics collection
+### v0.4.4 (2026-03-06) — Security Fix
+- Constant-time comparison for admin token (timing attack prevention)
 
 ---
 
-## 🎯 Roadmap
+## Roadmap
 
-### v1.0 (Target)
-- [x] 24h stability test (0% packet loss, 0 crashes) ✅
-- [ ] Multi-client concurrent test (5+ devices)
+### v1.1
+- [ ] QUIC transport with uTLS fingerprint camouflage
+- [ ] Domain fronting support (CDN-based SNI hiding)
+- [ ] Multi-connection traffic dispersion
+
+### v1.2
 - [ ] Mobile clients (iOS/Android)
-- [ ] GUI clients (Tauri desktop, Flutter mobile)
-
-### Future Considerations
-- [ ] Dynamic IP allocation (DHCP-like pool)
-- [ ] UUID rotation mechanism
-- [ ] Rate limiting (token bucket)
-- [ ] Prometheus metrics export
-- [ ] Grafana dashboard
-- [ ] Chrome plugin (smart routing rules)
+- [ ] GUI desktop clients (Tauri)
+- [ ] Chrome extension with smart routing rules
 
 ---
 
-## 📄 License
+## License
 
-MIT License - See [LICENSE](LICENSE) file for details.
-
----
-
-## 🤝 Contributing
-
-Contributions are welcome! Please:
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+MIT License — See [LICENSE](LICENSE) file.
 
 ---
 
-## 📧 Contact
+## Acknowledgments
 
-- **Repository**: https://github.com/ntcjoel/wsvpn
-- **Issues**: https://github.com/ntcjoel/wsvpn/issues
-
----
-
-## 🙏 Acknowledgments
-
-- [gorilla/websocket](https://github.com/gorilla/websocket) - WebSocket implementation
-- [songgao/water](https://github.com/songgao/water) - TUN/TAP interface
-- [quic-go](https://github.com/quic-go/quic-go) - QUIC implementation
-- [Wintun](https://www.wintun.net/) - Windows TUN driver
+- [gorilla/websocket](https://github.com/gorilla/websocket) — WebSocket implementation
+- [refraction-networking/utls](https://github.com/refraction-networking/utls) — TLS fingerprint camouflage
+- [quic-go](https://github.com/quic-go/quic-go) — QUIC implementation
+- [songgao/water](https://github.com/songgao/water) — TUN/TAP interface
+- [Wintun](https://www.wintun.net/) — Windows TUN driver

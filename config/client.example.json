@@ -7,5 +7,8 @@
   "log_level": "info",
   "obfuscation": true,
   "transport": "websocket",
-  "quic_sni": "your-domain.com"
+  "quic_sni": "your-domain.com",
+  "obfuscation_version": 1,
+  "tls_fingerprint": "chrome",
+  "traffic_shape": "off"
 }

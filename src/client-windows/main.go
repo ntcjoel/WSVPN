@@ -24,6 +24,7 @@ import (
 	"golang.zx2c4.com/wintun"
 	"github.com/gorilla/websocket"
 	"github.com/quic-go/quic-go"
+	utls "github.com/refraction-networking/utls"
 	"wsvpn/obfuscation"
 )
 
@@ -32,16 +33,19 @@ import (
 // ---------------------------------------------------
 
 type Config struct {
-	Name        string `json:"name"`
-	ClientIP    string `json:"client_ip"`
-	ServerURL   string `json:"server_url"`
-	UUID        string `json:"uuid"`
-	Reconnect   bool   `json:"reconnect"`
-	LogLevel    string `json:"log_level"`
-	Obfuscation string `json:"obfuscation"` // "on" or "off" (default: "on")
-	Transport   string `json:"transport"`
-	DNS         string `json:"dns"`
-	QUICSNI     string `json:"quic_sni"` // Optional: override QUIC SNI
+	Name              string `json:"name"`
+	ClientIP          string `json:"client_ip"`
+	ServerURL         string `json:"server_url"`
+	UUID              string `json:"uuid"`
+	Reconnect         bool   `json:"reconnect"`
+	LogLevel          string `json:"log_level"`
+	Obfuscation       string `json:"obfuscation"`         // "on" or "off" (default: "on")
+	Transport         string `json:"transport"`
+	DNS               string `json:"dns"`
+	QUICSNI           string `json:"quic_sni"`            // Optional: override QUIC SNI
+	ObfuscationVersion int   `json:"obfuscation_version"` // 1=legacy 4-byte header, 2=new randomized header
+	TLSFingerprint    string `json:"tls_fingerprint"`     // Browser TLS fingerprint: chrome, firefox, ios, edge, random
+	TrafficShape      string `json:"traffic_shape"`       // Traffic shaping mode: off, jitter, browse, adaptive
 }
 
 type Client struct {
@@ -56,7 +60,8 @@ type Client struct {
 	stopCh     chan struct{}
 	errCh      chan error
 	serverIP   string
-	wsWriteMu  sync.Mutex // Protect WebSocket writes (CRITICAL FIX #1)
+	wsWriteMu  sync.Mutex               // Protect WebSocket writes (CRITICAL FIX #1)
+	shape      *obfuscation.ShaperState // Traffic shaper
 }
 
 // ---------------------------------------------------
@@ -127,7 +132,7 @@ func loadWintunDriver() error {
 // Main & CLI parsing
 // ---------------------------------------------------
 
-const Version = "v0.4.9"
+const Version = "v1.0"
 
 func showHelp() {
 	fmt.Println("WSVPN Windows Client " + Version)
@@ -531,6 +536,9 @@ func (c *Client) start() error {
 	c.stopCh = make(chan struct{})
 	c.errCh = make(chan error, 3) // CRITICAL FIX #3: Buffer = 3 (one for each goroutine)
 
+	// Initialize traffic shaper
+	c.shape = obfuscation.NewShaperState(c.cfg.TrafficShape)
+
 	go c.forwardToServer()
 	go c.forwardFromServer()
 
@@ -608,14 +616,31 @@ func (c *Client) connect() (string, error) {
 	}
 }
 
-func (c *Client) connectWebSocket() (string, error) {
-	dialer := websocket.Dialer{
-		HandshakeTimeout: 10 * time.Second,
-		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: false,
-		},
+// getUTLSClientHelloID maps config fingerprint name to uTLS ClientHelloID
+func getUTLSClientHelloID(fingerprint string) utls.ClientHelloID {
+	switch fingerprint {
+	case obfuscation.TLSFingerprintFirefox:
+		return utls.HelloFirefox_Auto
+	case obfuscation.TLSFingerprintIOS:
+		return utls.HelloIOS_Auto
+	case obfuscation.TLSFingerprintEdge:
+		return utls.HelloEdge_Auto
+	case obfuscation.TLSFingerprintRandom:
+		ids := []utls.ClientHelloID{
+			utls.HelloChrome_Auto,
+			utls.HelloFirefox_Auto,
+			utls.HelloIOS_Auto,
+			utls.HelloEdge_Auto,
+		}
+		return ids[time.Now().UnixNano()%int64(len(ids))]
+	case obfuscation.TLSFingerprintChrome:
+		fallthrough
+	default:
+		return utls.HelloChrome_Auto
 	}
+}
 
+func (c *Client) connectWebSocket() (string, error) {
 	if !strings.HasPrefix(c.cfg.ServerURL, "wss://") && !strings.HasPrefix(c.cfg.ServerURL, "ws://") {
 		return "", fmt.Errorf("invalid server URL (must start with wss:// or ws://)")
 	}
@@ -624,7 +649,42 @@ func (c *Client) connectWebSocket() (string, error) {
 		return "", fmt.Errorf("invalid UUID (too short)")
 	}
 
-	wsURL := fmt.Sprintf("%s/ws/%s", c.cfg.ServerURL, c.cfg.UUID)
+	u, err := url.Parse(c.cfg.ServerURL)
+	if err != nil {
+		return "", fmt.Errorf("invalid server URL: %w", err)
+	}
+
+	hostname := u.Hostname()
+	port := u.Port()
+	if port == "" {
+		port = "443"
+	}
+	hostWithPort := net.JoinHostPort(hostname, port)
+
+	// Use ws:// scheme so gorilla doesn't perform TLS; uTLS does it via NetDial
+	wsURL := fmt.Sprintf("ws://%s/ws/%s?ov=%d", hostWithPort, c.cfg.UUID, c.cfg.ObfuscationVersion)
+
+	dialer := websocket.Dialer{
+		HandshakeTimeout: 10 * time.Second,
+		NetDial: func(network, addr string) (net.Conn, error) {
+			tcpConn, err := net.DialTimeout(network, addr, 10*time.Second)
+			if err != nil {
+				return nil, err
+			}
+
+			helloID := getUTLSClientHelloID(c.cfg.TLSFingerprint)
+			utlsConn := utls.UClient(tcpConn, &utls.Config{
+				ServerName: hostname,
+			}, helloID)
+			if err := utlsConn.Handshake(); err != nil {
+				tcpConn.Close()
+				return nil, fmt.Errorf("uTLS handshake failed: %w", err)
+			}
+
+			return utlsConn, nil
+		},
+	}
+
 	conn, _, err := dialer.Dial(wsURL, nil)
 	if err != nil {
 		return "", fmt.Errorf("dial WebSocket failed: %w", err)
@@ -641,7 +701,7 @@ func (c *Client) connectWebSocket() (string, error) {
 		return "", fmt.Errorf("invalid IP from server: %s", assignedIP)
 	}
 
-	log.Printf("Connection established")
+	log.Printf("Connection established (TLS fingerprint: %s)", c.cfg.TLSFingerprint)
 	return assignedIP, nil
 }
 
@@ -719,10 +779,26 @@ func (c *Client) connectQUIC() (string, error) {
 // Forwarding
 // ---------------------------------------------------
 
+func (c *Client) sendPacket(data []byte) error {
+	if c.cfg.Transport == "quic" {
+		if _, err := c.quicStream.Write(data); err != nil {
+			return fmt.Errorf("QUIC write: %w", err)
+		}
+	} else {
+		c.wsWriteMu.Lock()
+		err := c.conn.WriteMessage(websocket.BinaryMessage, data)
+		c.wsWriteMu.Unlock()
+		if err != nil {
+			return fmt.Errorf("WebSocket write: %w", err)
+		}
+	}
+	return nil
+}
+
 func (c *Client) forwardToServer() {
-	log.Printf("forwardToServer started")
+	log.Printf("forwardToServer started (traffic shape: %s)", c.cfg.TrafficShape)
 	packetCount := 0
-	
+
 	for {
 		if !c.isRunning() {
 			log.Printf("forwardToServer: client not running, exiting")
@@ -732,45 +808,48 @@ func (c *Client) forwardToServer() {
 		// Read packet from Wintun session
 		pkt, err := c.tunSession.ReceivePacket()
 		if err != nil {
-			// No packet available, wait a bit
 			time.Sleep(time.Millisecond)
 			continue
 		}
 
 		packetCount++
-		if packetCount <= 10 || packetCount % 100 == 0 {
+		if packetCount <= 10 || packetCount%100 == 0 {
 			log.Printf("TUN read: %d bytes (packet #%d)", len(pkt), packetCount)
 		}
 
 		// Check obfuscation setting (string: "on"/"off")
 		obfuscationEnabled := (c.cfg.Obfuscation == "" || c.cfg.Obfuscation == "on" || c.cfg.Obfuscation == "true" || c.cfg.Obfuscation == "1")
-		
+
 		var send []byte
 		if obfuscationEnabled {
-			send = obfuscation.SimulateHTTPSPattern(pkt)
+			send = obfuscation.SimulateHTTPSPatternVersion(pkt, c.cfg.ObfuscationVersion)
 		} else {
 			send = pkt
 		}
 
-		// Send packet to server
-		if c.cfg.Transport == "quic" {
-			if _, err := c.quicStream.Write(send); err != nil {
-				c.tunSession.ReleaseReceivePacket(pkt)
-				c.sendError(fmt.Errorf("QUIC write: %w", err))
-				return
-			}
-		} else {
-			c.wsWriteMu.Lock()
-			err := c.conn.WriteMessage(websocket.BinaryMessage, send)
-			c.wsWriteMu.Unlock()
-			if err != nil {
-				c.tunSession.ReleaseReceivePacket(pkt)
-				c.sendError(fmt.Errorf("WebSocket write: %w", err))
-				return
-			}
+		c.tunSession.ReleaseReceivePacket(pkt)
+
+		// Apply traffic shaping
+		delay, shouldBuffer := c.shape.NextDelay()
+		if shouldBuffer {
+			dataCopy := make([]byte, len(send))
+			copy(dataCopy, send)
+			go func(data []byte, d time.Duration) {
+				select {
+				case <-time.After(d):
+					_ = c.sendPacket(data)
+				case <-c.stopCh:
+				}
+			}(dataCopy, delay)
+			continue
+		} else if delay > 0 {
+			time.Sleep(delay)
 		}
 
-		c.tunSession.ReleaseReceivePacket(pkt)
+		if err := c.sendPacket(send); err != nil {
+			c.sendError(err)
+			return
+		}
 	}
 }
 
@@ -795,7 +874,7 @@ func (c *Client) forwardFromServer() {
 			// Check obfuscation setting (string: "on"/"off")
 			obfuscationEnabled := (c.cfg.Obfuscation == "" || c.cfg.Obfuscation == "on" || c.cfg.Obfuscation == "true" || c.cfg.Obfuscation == "1")
 			if obfuscationEnabled {
-				if pb, err := obfuscation.RemovePadding(pkt); err == nil {
+				if pb, err := obfuscation.RemovePaddingVersion(pkt, c.cfg.ObfuscationVersion); err == nil {
 					pkt = pb
 				}
 			}
@@ -827,7 +906,7 @@ func (c *Client) forwardFromServer() {
 			// Check obfuscation setting (string: "on"/"off")
 			obfuscationEnabled := (c.cfg.Obfuscation == "" || c.cfg.Obfuscation == "on" || c.cfg.Obfuscation == "true" || c.cfg.Obfuscation == "1")
 			if obfuscationEnabled {
-				if pb, err := obfuscation.RemovePadding(data); err == nil {
+				if pb, err := obfuscation.RemovePaddingVersion(data, c.cfg.ObfuscationVersion); err == nil {
 					data = pb
 				}
 			}
@@ -950,6 +1029,17 @@ func loadConfig(path string) (*Config, error) {
 	var cfg Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
+	}
+
+	// Apply defaults
+	if cfg.ObfuscationVersion == 0 {
+		cfg.ObfuscationVersion = obfuscation.ObfuscationVersion1
+	}
+	if cfg.TLSFingerprint == "" {
+		cfg.TLSFingerprint = obfuscation.TLSFingerprintChrome
+	}
+	if cfg.TrafficShape == "" {
+		cfg.TrafficShape = "off"
 	}
 
 	if err := validateConfig(&cfg); err != nil {

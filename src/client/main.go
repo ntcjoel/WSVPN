@@ -7,6 +7,8 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
+	"net/url"
 	"os"
 	"runtime"
 	"strings"
@@ -15,13 +17,14 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/quic-go/quic-go"
+	utls "github.com/refraction-networking/utls"
 	"github.com/songgao/water"
 	"github.com/vishvananda/netlink"
 	"wsvpn/logger"
 	"wsvpn/obfuscation"
 )
 
-const Version = "v0.4.9"
+const Version = "v1.0"
 
 // packetPool for buffer reuse to reduce GC pressure
 var packetPool = sync.Pool{
@@ -36,16 +39,19 @@ var structuredLog *logAlias
 
 // Config represents the client configuration
 type Config struct {
-	Name        string `json:"name"`
-	ClientIP    string `json:"client_ip"`
-	ServerURL   string `json:"server_url"`
-	UUID        string `json:"uuid"`
-	Reconnect   bool   `json:"reconnect"`
-	LogLevel    string `json:"log_level"`
-	LogDir      string `json:"log_dir"`
-	Obfuscation bool   `json:"obfuscation"`
-	Transport   string `json:"transport"`   // websocket or quic
-	QUICSNI     string `json:"quic_sni"`    // SNI hostname for QUIC TLS (defaults to server hostname)
+	Name              string `json:"name"`
+	ClientIP          string `json:"client_ip"`
+	ServerURL         string `json:"server_url"`
+	UUID              string `json:"uuid"`
+	Reconnect         bool   `json:"reconnect"`
+	LogLevel          string `json:"log_level"`
+	LogDir            string `json:"log_dir"`
+	Obfuscation       bool   `json:"obfuscation"`
+	Transport         string `json:"transport"`          // websocket or quic
+	QUICSNI           string `json:"quic_sni"`           // SNI hostname for QUIC TLS (defaults to server hostname)
+	ObfuscationVersion int   `json:"obfuscation_version"` // 1=legacy 4-byte header, 2=new randomized header
+	TLSFingerprint    string `json:"tls_fingerprint"`    // Browser TLS fingerprint: chrome, firefox, ios, edge, random
+	TrafficShape      string `json:"traffic_shape"`      // Traffic shaping mode: off, jitter, browse, adaptive
 }
 
 // Client represents the WSVPN client
@@ -57,6 +63,7 @@ type Client struct {
 	quicStream *quic.Stream
 	running    bool
 	stopCh     chan struct{}
+	shape      *obfuscation.ShaperState
 }
 
 // loadConfig loads configuration from JSON file
@@ -69,6 +76,43 @@ func loadConfig(path string) (*Config, error) {
 	var config Config
 	if err := json.Unmarshal(data, &config); err != nil {
 		return nil, fmt.Errorf("failed to parse config: %w", err)
+	}
+
+	// Apply defaults
+	if config.ObfuscationVersion == 0 {
+		config.ObfuscationVersion = obfuscation.ObfuscationVersion1
+	}
+	if config.TLSFingerprint == "" {
+		config.TLSFingerprint = obfuscation.TLSFingerprintChrome
+	}
+	if config.TrafficShape == "" {
+		config.TrafficShape = "off"
+	}
+
+	// Validate TLS fingerprint
+	validFingerprints := obfuscation.ValidTLSFingerprints()
+	fpValid := false
+	for _, fp := range validFingerprints {
+		if config.TLSFingerprint == fp {
+			fpValid = true
+			break
+		}
+	}
+	if !fpValid {
+		return nil, fmt.Errorf("invalid tls_fingerprint: %q (valid: %v)", config.TLSFingerprint, validFingerprints)
+	}
+
+	// Validate traffic shape
+	validShapes := obfuscation.ValidTrafficShapes()
+	shapeValid := false
+	for _, s := range validShapes {
+		if config.TrafficShape == s {
+			shapeValid = true
+			break
+		}
+	}
+	if !shapeValid {
+		return nil, fmt.Errorf("invalid traffic_shape: %q (valid: %v)", config.TrafficShape, validShapes)
 	}
 
 	return &config, nil
@@ -114,27 +158,84 @@ func (c *Client) initTUN() error {
 	return nil
 }
 
-// connectWebSocket establishes WebSocket connection to server
+// getUTLSClientHelloID maps config fingerprint name to uTLS ClientHelloID
+func getUTLSClientHelloID(fingerprint string) utls.ClientHelloID {
+	switch fingerprint {
+	case obfuscation.TLSFingerprintFirefox:
+		return utls.HelloFirefox_Auto
+	case obfuscation.TLSFingerprintIOS:
+		return utls.HelloIOS_Auto
+	case obfuscation.TLSFingerprintEdge:
+		return utls.HelloEdge_Auto
+	case obfuscation.TLSFingerprintRandom:
+		ids := []utls.ClientHelloID{
+			utls.HelloChrome_Auto,
+			utls.HelloFirefox_Auto,
+			utls.HelloIOS_Auto,
+			utls.HelloEdge_Auto,
+		}
+		return ids[time.Now().UnixNano()%int64(len(ids))]
+	case obfuscation.TLSFingerprintChrome:
+		fallthrough
+	default:
+		return utls.HelloChrome_Auto
+	}
+}
+
+// connectWebSocket establishes WebSocket connection to server with uTLS fingerprint camouflage
 func (c *Client) connectWebSocket() error {
-	dialer := websocket.Dialer{
-		HandshakeTimeout: 10 * time.Second,
+	u, err := url.Parse(c.config.ServerURL)
+	if err != nil {
+		return fmt.Errorf("invalid server URL: %w", err)
 	}
 
-	// Build WebSocket URL with UUID: ws://server:port/ws/{uuid}
-	wsURL := fmt.Sprintf("%s/ws/%s", c.config.ServerURL, c.config.UUID)
+	hostname := u.Hostname()
+	port := u.Port()
+	if port == "" {
+		port = "443"
+	}
+	hostWithPort := net.JoinHostPort(hostname, port)
+
+	// Use ws:// scheme (NOT wss://) so gorilla doesn't do TLS itself
+	// uTLS handshake is done in NetDial below
+	wsURL := fmt.Sprintf("ws://%s/ws/%s?ov=%d", hostWithPort, c.config.UUID, c.config.ObfuscationVersion)
+
+	dialer := websocket.Dialer{
+		HandshakeTimeout: 10 * time.Second,
+		NetDial: func(network, addr string) (net.Conn, error) {
+			tcpConn, err := net.DialTimeout(network, addr, 10*time.Second)
+			if err != nil {
+				return nil, err
+			}
+
+			// Perform uTLS handshake with browser-mimicking fingerprint
+			helloID := getUTLSClientHelloID(c.config.TLSFingerprint)
+			utlsConn := utls.UClient(tcpConn, &utls.Config{
+				ServerName: hostname,
+			}, helloID)
+			if err := utlsConn.Handshake(); err != nil {
+				tcpConn.Close()
+				return nil, fmt.Errorf("uTLS handshake failed: %w", err)
+			}
+
+			return utlsConn, nil
+		},
+	}
 
 	conn, _, err := dialer.Dial(wsURL, nil)
 	if err != nil {
 		structuredLog.Error("websocket_connect", "Failed to connect to server", map[string]interface{}{
-			"url":   wsURL,
-			"error": err.Error(),
+			"url":         wsURL,
+			"fingerprint": c.config.TLSFingerprint,
+			"error":       err.Error(),
 		})
 		return fmt.Errorf("failed to connect to server (%s): %w", wsURL, err)
 	}
 
 	c.conn = conn
 	structuredLog.Info("websocket_connected", "Connected to WebSocket server", map[string]interface{}{
-		"url": wsURL,
+		"url":         wsURL,
+		"fingerprint": c.config.TLSFingerprint,
 	})
 
 	// Read assigned IP from server
@@ -258,6 +359,20 @@ func (c *Client) connectQUIC() error {
 	return nil
 }
 
+// sendPacket writes data to the active transport
+func (c *Client) sendPacket(data []byte) error {
+	if c.config.Transport == "quic" {
+		if _, err := c.quicStream.Write(data); err != nil {
+			return fmt.Errorf("QUIC write: %w", err)
+		}
+	} else {
+		if err := c.conn.WriteMessage(websocket.BinaryMessage, data); err != nil {
+			return fmt.Errorf("WebSocket write: %w", err)
+		}
+	}
+	return nil
+}
+
 // forwardToServer forwards packets from TUN to server (supports both transports)
 func (c *Client) forwardToServer() {
 	buffer := packetPool.Get().([]byte)
@@ -285,26 +400,34 @@ func (c *Client) forwardToServer() {
 		// Add obfuscation padding before sending
 		var sendData []byte
 		if c.config.Obfuscation {
-			sendData = obfuscation.SimulateHTTPSPattern(packet)
+			sendData = obfuscation.SimulateHTTPSPatternVersion(packet, c.config.ObfuscationVersion)
 		} else {
 			sendData = packet
 		}
 
-		// Send based on transport type
-		if c.config.Transport == "quic" {
-			if _, err := c.quicStream.Write(sendData); err != nil {
-				structuredLog.Error("quic_write", "Failed to write to QUIC stream", map[string]interface{}{
-					"error": err.Error(),
-				})
-				return
-			}
-		} else {
-			if err := c.conn.WriteMessage(websocket.BinaryMessage, sendData); err != nil {
-				structuredLog.Error("ws_write", "Failed to write to WebSocket", map[string]interface{}{
-					"error": err.Error(),
-				})
-				return
-			}
+		// Apply traffic shaping
+		delay, shouldBuffer := c.shape.NextDelay()
+		if shouldBuffer {
+			// Pause — buffer packet and send after delay via goroutine
+			dataCopy := make([]byte, len(sendData))
+			copy(dataCopy, sendData)
+			go func(data []byte, d time.Duration) {
+				select {
+				case <-time.After(d):
+					_ = c.sendPacket(data)
+				case <-c.stopCh:
+				}
+			}(dataCopy, delay)
+			continue
+		} else if delay > 0 {
+			time.Sleep(delay)
+		}
+
+		if err := c.sendPacket(sendData); err != nil {
+			structuredLog.Error("send_packet", "Failed to send packet", map[string]interface{}{
+				"error": err.Error(),
+			})
+			return
 		}
 	}
 }
@@ -342,7 +465,7 @@ func (c *Client) forwardFromWebSocket(buffer []byte) {
 		var packet []byte
 		if c.config.Obfuscation {
 			var err error
-			packet, err = obfuscation.RemovePadding(data)
+			packet, err = obfuscation.RemovePaddingVersion(data, c.config.ObfuscationVersion)
 			if err != nil {
 				structuredLog.Warn("obfuscation_remove", "Failed to remove padding from WebSocket data", map[string]interface{}{
 					"error": err.Error(),
@@ -382,7 +505,7 @@ func (c *Client) forwardFromQUIC(buffer []byte) {
 		var packet []byte
 		if c.config.Obfuscation {
 			var err error
-			packet, err = obfuscation.RemovePadding(buffer[:n])
+			packet, err = obfuscation.RemovePaddingVersion(buffer[:n], c.config.ObfuscationVersion)
 			if err != nil {
 				structuredLog.Warn("obfuscation_remove", "Failed to remove padding from QUIC data", map[string]interface{}{
 					"error": err.Error(),
@@ -439,6 +562,9 @@ func (c *Client) reconnect() {
 func (c *Client) start() error {
 	c.running = true
 	c.stopCh = make(chan struct{})
+
+	// Initialize traffic shaper
+	c.shape = obfuscation.NewShaperState(c.config.TrafficShape)
 
 	// Initial connection
 	if err := c.connect(); err != nil {
