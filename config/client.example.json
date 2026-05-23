@@ -9,5 +9,7 @@
   "transport": "websocket",
   "quic_sni": "your-domain.com",
   "tls_fingerprint": "chrome",
-  "traffic_shape": "off"
+  "traffic_shape": "off",
+  "front_domain": "",
+  "dispersion_peers": []
 }

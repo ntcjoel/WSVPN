@@ -21,7 +21,7 @@ import (
 	"wsvpn/obfuscation"
 )
 
-const Version = "v1.0"
+const Version = "v1.2"
 
 // Config represents the server configuration
 type Config struct {
@@ -34,9 +34,11 @@ type Config struct {
 	ClientsFile              string `json:"clients_file"`
 	LogLevel                 string `json:"log_level"`
 	LogDir                   string `json:"log_dir"`
-	Obfuscation bool   `json:"obfuscation"`
-	AdminToken  string `json:"admin_token"`
-	Transport   string `json:"transport"` // websocket, quic, or both
+	Obfuscation   bool   `json:"obfuscation"`
+	AdminToken    string `json:"admin_token"`
+	Transport     string `json:"transport"`      // websocket, quic, or both
+	SOCKS5Enabled bool   `json:"socks5_enabled"` // Built-in SOCKS5 proxy (default: true)
+	SOCKS5Port    int    `json:"socks5_port"`    // SOCKS5 proxy port (default: 1744)
 }
 
 // Global structured logger instance (named differently to avoid conflict with stdlib log)
@@ -503,6 +505,11 @@ func main() {
 		config.Transport = "websocket"
 	}
 
+	// Set default SOCKS5 port
+	if config.SOCKS5Port == 0 {
+		config.SOCKS5Port = 1744
+	}
+
 	// Initialize structured logger
 	structuredLog, err = logger.New("server", config.LogDir, logger.ParseLevel(config.LogLevel))
 	if err != nil {
@@ -644,6 +651,14 @@ func main() {
 	// 		}
 	// 	}()
 	// }
+
+	// Start built-in SOCKS5 proxy (enabled by default)
+	if config.SOCKS5Enabled {
+		socks5Addr := net.JoinHostPort(config.ServerIP, fmt.Sprintf("%d", config.SOCKS5Port))
+		go startSOCKS5(socks5Addr)
+	} else {
+		structuredLog.Info("socks5_disabled", "SOCKS5 proxy disabled via config", nil)
+	}
 
 	// Setup signal handlers for hot reload
 	setupSignalHandlers(ctx, cancel, clientManager)

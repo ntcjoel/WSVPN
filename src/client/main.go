@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -24,7 +25,7 @@ import (
 	"wsvpn/obfuscation"
 )
 
-const Version = "v1.0"
+const Version = "v1.2"
 
 // packetPool for buffer reuse to reduce GC pressure
 var packetPool = sync.Pool{
@@ -50,7 +51,9 @@ type Config struct {
 	Transport      string `json:"transport"`       // websocket or quic
 	QUICSNI        string `json:"quic_sni"`        // SNI hostname for QUIC TLS (defaults to server hostname)
 	TLSFingerprint string `json:"tls_fingerprint"` // Browser TLS fingerprint: chrome, firefox, ios, edge, random
-	TrafficShape   string `json:"traffic_shape"`   // Traffic shaping mode: off, jitter, browse, adaptive
+	TrafficShape    string   `json:"traffic_shape"`    // Traffic shaping mode: off, jitter, browse, adaptive
+	FrontDomain     string   `json:"front_domain"`     // CDN front domain for domain fronting: SNI=front, Host=real
+	DispersionPeers []string `json:"dispersion_peers"` // Additional server URLs for traffic dispersion
 }
 
 // Client represents the WSVPN client
@@ -63,6 +66,8 @@ type Client struct {
 	running    bool
 	stopCh     chan struct{}
 	shape      *obfuscation.ShaperState
+	peerConns  []*websocket.Conn // Extra connections for traffic dispersion
+	sendIdx    uint32             // Atomic counter for round-robin sending
 }
 
 // loadConfig loads configuration from JSON file
@@ -178,36 +183,53 @@ func getUTLSClientHelloID(fingerprint string) utls.ClientHelloID {
 	}
 }
 
-// connectWebSocket establishes WebSocket connection to server with uTLS fingerprint camouflage
+// connectWebSocket establishes WebSocket connection to server with uTLS fingerprint camouflage.
+// When FrontDomain is configured, uses domain fronting: TCP+TLS to CDN, Host header to real server.
 func (c *Client) connectWebSocket() error {
 	u, err := url.Parse(c.config.ServerURL)
 	if err != nil {
 		return fmt.Errorf("invalid server URL: %w", err)
 	}
 
-	hostname := u.Hostname()
+	realHost := u.Hostname()
+	connectHost := realHost // Host we actually TCP+TLS connect to
+	sniHost := realHost     // TLS SNI
+
+	// Domain fronting: connect to CDN front domain, SNI = front, Host header = real server
+	if c.config.FrontDomain != "" {
+		fu, err := url.Parse(c.config.FrontDomain)
+		if err == nil {
+			connectHost = fu.Hostname()
+		} else {
+			connectHost = c.config.FrontDomain
+		}
+		sniHost = connectHost
+	}
+
 	port := u.Port()
 	if port == "" {
 		port = "443"
 	}
-	hostWithPort := net.JoinHostPort(hostname, port)
+	connectAddr := net.JoinHostPort(connectHost, port)
+	realAddr := net.JoinHostPort(realHost, port)
 
-	// Use ws:// scheme (NOT wss://) so gorilla doesn't do TLS itself
-	// uTLS handshake is done in NetDial below
-	wsURL := fmt.Sprintf("ws://%s/ws/%s", hostWithPort, c.config.UUID)
+	// Use ws:// scheme so gorilla doesn't do TLS; uTLS handles it in NetDial.
+	// URL uses the REAL host for the Host header; TCP+TLS goes to the front domain.
+	wsURL := fmt.Sprintf("ws://%s/ws/%s", realAddr, c.config.UUID)
 
 	dialer := websocket.Dialer{
 		HandshakeTimeout: 10 * time.Second,
 		NetDial: func(network, addr string) (net.Conn, error) {
-			tcpConn, err := net.DialTimeout(network, addr, 10*time.Second)
+			// Ignore addr; connect to front domain or real server
+			tcpConn, err := net.DialTimeout(network, connectAddr, 10*time.Second)
 			if err != nil {
 				return nil, err
 			}
 
-			// Perform uTLS handshake with browser-mimicking fingerprint
+			// Perform uTLS handshake with SNI = front/connect domain
 			helloID := getUTLSClientHelloID(c.config.TLSFingerprint)
 			utlsConn := utls.UClient(tcpConn, &utls.Config{
-				ServerName: hostname,
+				ServerName: sniHost,
 			}, helloID)
 			if err := utlsConn.Handshake(); err != nil {
 				tcpConn.Close()
@@ -355,16 +377,22 @@ func (c *Client) connectQUIC() error {
 	return nil
 }
 
-// sendPacket writes data to the active transport
+// sendPacket writes data to the active transport, dispersing across peer connections.
 func (c *Client) sendPacket(data []byte) error {
 	if c.config.Transport == "quic" {
 		if _, err := c.quicStream.Write(data); err != nil {
 			return fmt.Errorf("QUIC write: %w", err)
 		}
-	} else {
-		if err := c.conn.WriteMessage(websocket.BinaryMessage, data); err != nil {
-			return fmt.Errorf("WebSocket write: %w", err)
-		}
+		return nil
+	}
+
+	// Traffic dispersion: round-robin across all connections
+	idx := int(atomic.AddUint32(&c.sendIdx, 1))
+	allConns := append([]*websocket.Conn{c.conn}, c.peerConns...)
+	conn := allConns[idx%len(allConns)]
+
+	if err := conn.WriteMessage(websocket.BinaryMessage, data); err != nil {
+		return fmt.Errorf("WebSocket write: %w", err)
 	}
 	return nil
 }
@@ -571,6 +599,30 @@ func (c *Client) start() error {
 	go c.forwardToServer()
 	go c.forwardFromServer()
 
+	// Connect to dispersion peers (additional servers for traffic distribution)
+	for _, peerURL := range c.config.DispersionPeers {
+		// Temporarily swap config to connect to peer
+		savedURL := c.config.ServerURL
+		savedFront := c.config.FrontDomain
+		c.config.ServerURL = peerURL
+		c.config.FrontDomain = "" // Peer connections use direct URLs (no domain fronting)
+		if err := c.connect(); err != nil {
+			structuredLog.Warn("dispersion_peer", "Failed to connect to peer", map[string]interface{}{
+				"peer":  peerURL,
+				"error": err.Error(),
+			})
+			c.config.ServerURL = savedURL
+			c.config.FrontDomain = savedFront
+			continue
+		}
+		c.peerConns = append(c.peerConns, c.conn)
+		structuredLog.Info("dispersion_peer", "Connected to peer", map[string]interface{}{
+			"peer": peerURL,
+		})
+		c.config.ServerURL = savedURL
+		c.config.FrontDomain = savedFront
+	}
+
 	// Start irregular heartbeat (DPI evasion)
 	go c.irregularHeartbeat()
 
@@ -615,6 +667,9 @@ func (c *Client) stop() {
 	close(c.stopCh)
 	if c.conn != nil {
 		c.conn.Close()
+	}
+	for _, pc := range c.peerConns {
+		pc.Close()
 	}
 	if c.quicStream != nil {
 		c.quicStream.Close()

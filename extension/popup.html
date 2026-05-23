@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>WSVPN Proxy</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      width: 280px;
+      padding: 16px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      font-size: 13px;
+      color: #333;
+    }
+    h3 { font-size: 15px; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
+    label { display: flex; align-items: center; gap: 8px; margin: 8px 0; cursor: pointer; }
+    input[type="text"], input[type="number"] {
+      width: 100%;
+      padding: 6px 8px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      font-size: 12px;
+    }
+    .row { display: flex; gap: 8px; margin: 4px 0; }
+    .row label { flex: 1; }
+    .btn {
+      display: inline-block;
+      padding: 6px 16px;
+      margin-top: 12px;
+      background: #1a73e8;
+      color: #fff;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    .btn:hover { background: #1557b0; }
+    .btn-sm {
+      padding: 2px 8px;
+      font-size: 11px;
+      margin: 2px 0 2px 8px;
+    }
+    .on { color: #0a8043; font-weight: bold; }
+    .off { color: #c5221f; }
+    textarea {
+      width: 100%;
+      height: 50px;
+      font-size: 11px;
+      padding: 4px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      resize: vertical;
+    }
+    .hint { font-size: 11px; color: #888; margin-top: 4px; }
+  </style>
+</head>
+<body>
+  <h3>
+    <span>WSVPN Proxy</span>
+    <span id="status" class="off">OFF</span>
+  </h3>
+
+  <label>
+    <input type="checkbox" id="enabled">
+    <strong>Enable VPN routing</strong>
+  </label>
+
+  <div class="row">
+    <label>Proxy host</label>
+    <input type="text" id="proxyHost" value="10.9.1.1">
+  </div>
+  <div class="row">
+    <label>Proxy port</label>
+    <input type="number" id="proxyPort" value="1744" min="1" max="65535">
+  </div>
+
+  <label>
+    <input type="checkbox" id="bypassChina">
+    Route China mainland IPs through VPN
+  </label>
+
+  <label>
+    <input type="checkbox" id="bypassLAN">
+    Route LAN IPs through VPN
+  </label>
+
+  <label style="display:block; margin-top: 8px;">
+    Custom CIDR (one per line):
+    <textarea id="customCIDR" placeholder="e.g. 203.0.113.0/24"></textarea>
+  </label>
+  <div class="hint">Traffic matching these CIDRs will be routed through the VPN SOCKS5 proxy.</div>
+
+  <button class="btn" id="save">Apply</button>
+
+  <script src="popup.js"></script>
+</body>
+</html>

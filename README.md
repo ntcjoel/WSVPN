@@ -1,37 +1,38 @@
 # WSVPN — WebSocket VPN
 
-**Version:** v1.0
+**Version:** v1.2
 **Status:** Production Ready
-**License:** MIT License
+**License:** MIT
 
 ---
 
 ## Overview
 
-WSVPN is a lightweight WebSocket-based VPN for personal and small-team use. It tunnels IP traffic through a standard WebSocket-over-TLS (WSS) connection — indistinguishable from normal HTTPS traffic. Advanced obfuscation resists deep packet inspection and traffic analysis.
+WSVPN is a lightweight WebSocket-based VPN for personal and small-team use. It tunnels IP traffic through standard WebSocket-over-TLS (WSS) connections — indistinguishable from normal HTTPS traffic. Advanced obfuscation resists deep packet inspection and traffic analysis.
 
 ### Key Features
 
-- **TLS Fingerprint Camouflage** — Mimics Chrome, Firefox, iOS, or Edge browser TLS handshakes (uTLS). The TLS ClientHello is indistinguishable from a real browser.
-- **Traffic Shaping** — Burst/pause state machine simulates human browsing patterns. No continuous-stream VPN signature.
-- **Randomized Packet Obfuscation** — Every packet header contains crypto-random bytes. No fixed pattern detectable by DPI.
-- **WebSocket over TLS** — Standard WSS on port 443. Works behind any HTTPS reverse proxy (Nginx, Caddy).
-- **UUID Authentication** — Simple device-based access control with static IP allocation.
-- **Config Hot Reload** — Update configuration without restart (SIGHUP or HTTP API).
-- **Auto-Reconnect** — Exponential backoff on network failure.
-- **Docker Support** — Single-command deployment with Docker Compose.
-- **Cross-Platform** — Linux server/client + Windows CLI client (Wintun driver).
-- **Lightweight** — Single binary, <12 MB memory per instance.
+- **TLS Fingerprint Camouflage** — Mimics Chrome, Firefox, iOS, or Edge browser TLS handshakes (uTLS)
+- **Traffic Shaping** — Burst/pause state machine simulates human browsing patterns
+- **Randomized Packet Obfuscation** — Every packet header contains crypto-random bytes
+- **Domain Fronting** — CDN-based SNI hiding: TLS connects to a front domain, real destination hidden in encrypted Host header
+- **Multi-Connection Dispersion** — Traffic distributed across multiple server domains to simulate multi-site browsing
+- **Built-in SOCKS5 Proxy** — Server exposes a SOCKS5 proxy on the VPN IP (default: port 1744)
+- **Chrome Extension** — Smart PAC-based routing with China mainland / LAN / custom CIDR bypass rules
+- **UUID Authentication** — Device-based access control with static IP allocation
+- **Config Hot Reload** — Update configuration without restart
+- **Docker Support** — Single-command deployment with Docker Compose
+- **Cross-Platform** — Linux server/client + Windows CLI client (Wintun driver)
 
 ---
 
 ## Anti-DPI Design
 
-WSVPN uses three layers of obfuscation:
+Three layers of obfuscation:
 
 ### Layer 1 — TLS Fingerprint Camouflage
 
-Go's default `crypto/tls` produces a distinctive JA3/JA4 fingerprint that marks the client as a Go program. WSVPN uses `refraction-networking/utls` to mimic real browser TLS ClientHello messages:
+Go's default `crypto/tls` produces a distinctive JA3/JA4 fingerprint. WSVPN uses `refraction-networking/utls` to mimic real browsers:
 
 | `tls_fingerprint` | Mimics |
 |-------------------|--------|
@@ -43,7 +44,7 @@ Go's default `crypto/tls` produces a distinctive JA3/JA4 fingerprint that marks 
 
 ### Layer 2 — Traffic Shaping
 
-Continuous bidirectional throughput is a VPN signature. WSVPN uses a burst/pause state machine:
+Burst/pause state machine breaks the continuous-stream VPN signature:
 
 | `traffic_shape` | Behavior |
 |-----------------|----------|
@@ -54,99 +55,62 @@ Continuous bidirectional throughput is a VPN signature. WSVPN uses a burst/pause
 
 ### Layer 3 — Randomized Packet Obfuscation
 
-Packets are padded to HTTPS-typical sizes (64/256/1024/1480 bytes, weighted distribution). The header format uses a 4-byte prefix where 2 bytes encode the original length and 2 bytes are crypto-random — every packet header looks different.
+Packets are padded to HTTPS-typical sizes (64/256/1024/1480 bytes, weighted distribution). Each header contains 2 bytes of crypto-random data — no two packets have the same header pattern.
+
+---
+
+## Architecture
 
 ```
-[03 28 a7 f1][original payload...][random padding...]
- ───┬─── ──┬──
-   len    random (changes per packet)
+Client Device
+  Application → TUN (10.9.1.x)
+    → Obfuscation + Traffic Shaping
+      → uTLS (Chrome/Firefox fingerprint)
+        → wss://domain/ws/{uuid}  ──→  Internet (TLS 1.3)
+                                         → Nginx → WSVPN Server (:8180)
+                                           → TUN (10.9.1.1)
+                                             → Internet / SOCKS5 (:1744)
 ```
 
 ---
 
 ## Quick Start
 
-### Docker Compose (recommended)
+### Docker Compose
 
 ```bash
 git clone https://github.com/ntcjoel/wsvpn.git
 cd wsvpn
-
-# Prepare config and SSL certificate
 mkdir -p nginx/ssl nginx/html
 cp config/server.example.json config/server.json
 cp config/clients.example.json config/clients.json
-# Edit server.json and clients.json with your settings
-# Place your SSL cert at nginx/ssl/cert.pem and nginx/ssl/key.pem
+# Edit config files, place SSL cert at nginx/ssl/
 
-# Start
 docker compose up -d
-
-# Check health
-curl https://your-domain.com/ws/health?token=your-admin-token
+curl "https://your-domain.com/ws/health?token=your-admin-token"
 ```
 
-### Docker (standalone server)
+### Docker (standalone)
 
 ```bash
-# Build
 docker build -t wsvpn-server .
-
-# Run (requires NET_ADMIN for TUN interface)
-docker run -d \
-    --cap-add=NET_ADMIN \
-    --name wsvpn \
-    -p 8180:8180 \
-    -v $(pwd)/config:/config:ro \
-    wsvpn-server
+docker run -d --cap-add=NET_ADMIN --name wsvpn \
+    -p 8180:8180 -v $(pwd)/config:/config:ro wsvpn-server
 ```
 
 ### Build from Source
 
 ```bash
-git clone https://github.com/ntcjoel/wsvpn.git
-cd wsvpn
-
-# Build with latest dependencies
-./scripts/build.sh all --update-deps
-
-# Build Windows client
-./scripts/build-windows.sh --update-deps
+./scripts/build.sh all --update-deps     # Linux
+./scripts/build-windows.sh --update-deps # Windows
 ```
 
-The `--update-deps` flag pulls the latest uTLS (browser fingerprints), gorilla/websocket, and quic-go.
-
-### Manual Server Setup
+### Manual Deploy
 
 ```bash
-# Copy binary and config
-scp build/wsvpn-server user@server:~/wsvpn/
-scp config/server.json user@server:~/wsvpn/
-scp config/clients.json user@server:~/wsvpn/
-
-# Set capability (avoids running as root)
+scp build/wsvpn-server config/*.json user@server:~/wsvpn/
 ssh user@server "sudo setcap cap_net_admin+ep ~/wsvpn/wsvpn-server"
-
-# Start
 ssh user@server "cd ~/wsvpn && nohup ./wsvpn-server > server.log 2>&1 &"
-```
-
-### Client Setup
-
-```bash
-# Linux
-scp build/wsvpn-client config/client.json user@client:~/wsvpn-client/
-ssh user@client "sudo setcap cap_net_admin+ep ~/wsvpn-client/wsvpn-client"
-ssh user@client "cd ~/wsvpn-client && nohup ./wsvpn-client > client.log 2>&1 &"
-
-# Windows — copy build/ directory, then:
-wsvpn-client.exe connect --config client.json
-```
-
-### Verify
-
-```bash
-ping 10.9.1.1
 ```
 
 ---
@@ -165,9 +129,16 @@ ping 10.9.1.1
   "clients_file": "clients.json",
   "log_level": "info",
   "obfuscation": true,
+  "socks5_enabled": true,
+  "socks5_port": 1744,
   "admin_token": "your-32-char-random-token-here"
 }
 ```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `socks5_enabled` | `true` | Built-in SOCKS5 proxy |
+| `socks5_port` | `1744` | SOCKS5 proxy listen port |
 
 ### Client (`config/client.json`)
 
@@ -183,34 +154,59 @@ ping 10.9.1.1
   "transport": "websocket",
   "tls_fingerprint": "chrome",
   "traffic_shape": "browse",
+  "front_domain": "",
+  "dispersion_peers": [],
   "quic_sni": "your-domain.com"
 }
 ```
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `obfuscation` | `true` | Enable packet obfuscation |
-| `tls_fingerprint` | `"chrome"` | Browser TLS fingerprint to mimic |
+| `tls_fingerprint` | `"chrome"` | Browser TLS fingerprint |
 | `traffic_shape` | `"off"` | Traffic shaping mode |
+| `front_domain` | `""` | CDN front domain for domain fronting |
+| `dispersion_peers` | `[]` | Additional server URLs for traffic dispersion |
 
-### Clients (`config/clients.json`)
+### Domain Fronting
+
+Route VPN traffic through a CDN to hide the real server:
 
 ```json
 {
-  "clients": [
-    {
-      "uuid": "device-phone-001",
-      "ip": "10.9.1.2",
-      "name": "My-iPhone",
-      "enabled": true
-    }
-  ],
-  "network": "10.9.1.0/24",
-  "next_dynamic_ip": 50
+  "server_url": "wss://real-server.com",
+  "front_domain": "https://d123.cloudfront.net"
 }
 ```
 
-### Nginx (`nginx/nginx.conf`)
+- TLS connects to `d123.cloudfront.net` (visible to DPI)
+- HTTP Host header is `real-server.com` (hidden inside TLS)
+- CDN must be configured to forward to `real-server.com` as origin
+
+### Traffic Dispersion
+
+Distribute VPN packets across multiple servers:
+
+```json
+{
+  "server_url": "wss://primary.com",
+  "dispersion_peers": [
+    "wss://secondary.com",
+    "wss://tertiary.com"
+  ]
+}
+```
+
+Packets are round-robin distributed across all connections. A DPI observer sees connections to multiple different domains — resembling normal multi-site browsing.
+
+### SOCKS5 Proxy
+
+The server automatically exposes a SOCKS5 proxy (RFC 1928) on `10.9.1.1:1744`. VPN clients can use this proxy directly:
+
+```bash
+curl --socks5 10.9.1.1:1744 https://example.com
+```
+
+### Nginx
 
 ```nginx
 server {
@@ -225,50 +221,51 @@ server {
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
         proxy_set_header Host $host;
-        proxy_pass http://wsvpn:8180;
+        proxy_pass http://127.0.0.1:8180;
         proxy_read_timeout 3600s;
     }
 
-    location /ws/health {
-        proxy_pass http://wsvpn:8180/ws/health;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-    }
-
-    location /ws/reload {
-        proxy_pass http://wsvpn:8180/ws/reload;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-    }
+    location /ws/health { proxy_pass http://127.0.0.1:8180/ws/health; proxy_http_version 1.1; proxy_set_header Host $host; }
+    location /ws/reload { proxy_pass http://127.0.0.1:8180/ws/reload; proxy_http_version 1.1; proxy_set_header Host $host; }
 }
 ```
 
 ---
 
-## Docker Compose Quick Reference
+## Chrome Extension
 
-```
-services:
-  wsvpn          — VPN server (port 8180, internal only)
-  nginx          — TLS termination + reverse proxy (port 443)
-```
+`extension/` contains a Chrome extension that routes traffic through the VPN SOCKS5 proxy using PAC (Proxy Auto-Config) scripting.
 
-Directory layout for Docker Compose:
+### Features
+
+- Route China mainland IP ranges through the VPN
+- Route LAN addresses through the VPN
+- Custom CIDR ranges
+- One-click enable/disable from toolbar popup
+
+### Install
+
+1. Chrome → `chrome://extensions` → Developer mode ON
+2. Load unpacked → select `extension/` directory
+3. Click toolbar icon to configure
+
+---
+
+## Docker Compose Layout
 
 ```
 wsvpn/
 ├── docker-compose.yml
 ├── Dockerfile
 ├── config/
-│   ├── server.json          # Server configuration
-│   └── clients.json         # Client UUID/IP list
+│   ├── server.json
+│   └── clients.json
 ├── nginx/
-│   ├── nginx.conf           # Nginx reverse proxy config
-│   ├── ssl/
-│   │   ├── cert.pem         # SSL certificate
-│   │   └── key.pem          # SSL private key
-│   └── html/
-│       └── index.html       # Optional: landing page
+│   ├── nginx.conf
+│   └── ssl/
+│       ├── cert.pem
+│       └── key.pem
+└── extension/          # Chrome extension (optional)
 ```
 
 ---
@@ -276,27 +273,11 @@ wsvpn/
 ## Monitoring
 
 ```bash
-# Health check
 curl "https://your-domain.com/ws/health?token=your-admin-token"
+# → {"status":"healthy","clients":{"connected":2},"traffic":{...}}
 ```
 
-```json
-{
-  "status": "healthy",
-  "uptime": "2h30m15s",
-  "clients": {"connected": 2, "configured": 2},
-  "traffic": {"bytes_in": 1048576, "bytes_out": 2097152},
-  "system": {"goroutines": 8, "memory_alloc_bytes": 5242880}
-}
-```
-
-### Hot Reload
-
-```bash
-docker compose exec wsvpn kill -SIGHUP 1
-# or
-curl -X POST "https://your-domain.com/ws/reload?token=your-admin-token"
-```
+Hot reload: `kill -SIGHUP $(pgrep wsvpn-server)` or `POST /ws/reload`
 
 ---
 
@@ -312,48 +293,29 @@ curl -X POST "https://your-domain.com/ws/reload?token=your-admin-token"
 
 ## Keeping Dependencies Current
 
-uTLS fingerprints must stay current with browser updates. Rebuild with:
-
 ```bash
-./scripts/build.sh all --update-deps
-./scripts/build-windows.sh --update-deps
+./scripts/build.sh all --update-deps     # Pulls latest uTLS, gorilla, quic-go
 ```
 
-Add `--update-deps` to CI/CD or a monthly cron job.
+Recommended: rebuild monthly to keep TLS fingerprints aligned with browser updates.
 
 ---
 
 ## Troubleshooting
 
-**"Failed to create TUN interface: operation not permitted"**
-```bash
-sudo setcap cap_net_admin+ep ./wsvpn-server
-# Docker: ensure --cap-add=NET_ADMIN
-```
-
-**"Address already in use"**
-```bash
-pkill -9 -f wsvpn-server
-# Docker: docker compose down && docker compose up -d
-```
-
-**"WebSocket handshake failed"**
-```bash
-nginx -t && nginx -s reload
-openssl s_client -connect your-domain.com:443
-```
-
-**"Unauthorized UUID"** — Add UUID to `clients.json`, send SIGHUP or call `/ws/reload`.
-
-**DNS failure on Windows** — `ipconfig /flushdns`
+| Problem | Solution |
+|---------|----------|
+| TUN permission denied | `sudo setcap cap_net_admin+ep ./wsvpn-server` (Docker: `--cap-add=NET_ADMIN`) |
+| Address in use | `pkill -9 -f wsvpn-server` |
+| WebSocket handshake failed | `nginx -t && nginx -s reload` |
+| Unauthorized UUID | Add UUID to `clients.json`, reload via SIGHUP |
+| DNS failure (Windows) | `ipconfig /flushdns` |
 
 ---
 
 ## Roadmap
 
-- [ ] QUIC transport with uTLS fingerprint camouflage
-- [ ] Domain fronting (CDN-based SNI hiding)
-- [ ] Multi-connection traffic dispersion
+- [ ] QUIC transport with uTLS fingerprint
 - [ ] Mobile clients (iOS/Android)
 - [ ] GUI desktop clients
 
@@ -361,9 +323,7 @@ openssl s_client -connect your-domain.com:443
 
 ## License
 
-MIT License — See [LICENSE](LICENSE) file.
-
----
+MIT — See [LICENSE](LICENSE).
 
 ## Acknowledgments
 

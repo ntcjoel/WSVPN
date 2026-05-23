@@ -18,6 +18,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -45,6 +46,8 @@ type Config struct {
 	QUICSNI        string `json:"quic_sni"`        // Optional: override QUIC SNI
 	TLSFingerprint string `json:"tls_fingerprint"` // Browser TLS fingerprint: chrome, firefox, ios, edge, random
 	TrafficShape   string `json:"traffic_shape"`   // Traffic shaping mode: off, jitter, browse, adaptive
+	FrontDomain     string   `json:"front_domain"`     // CDN front domain for domain fronting: SNI=front, Host=real
+	DispersionPeers []string `json:"dispersion_peers"` // Additional server URLs for traffic dispersion
 }
 
 type Client struct {
@@ -60,7 +63,9 @@ type Client struct {
 	errCh      chan error
 	serverIP   string
 	wsWriteMu  sync.Mutex               // Protect WebSocket writes (CRITICAL FIX #1)
-	shape      *obfuscation.ShaperState // Traffic shaper
+	shape     *obfuscation.ShaperState // Traffic shaper
+	peerConns []*websocket.Conn        // Extra connections for traffic dispersion
+	sendIdx   uint32                    // Atomic counter for round-robin sending
 }
 
 // ---------------------------------------------------
@@ -298,6 +303,21 @@ func (c *Client) runConnection() error {
 	}
 
 	log.Println("VPN connection established successfully")
+
+	// Connect to dispersion peers for traffic distribution
+	for _, peerURL := range c.cfg.DispersionPeers {
+		savedURL := c.cfg.ServerURL
+		c.cfg.ServerURL = peerURL
+		peerIP, err := c.connect()
+		if err != nil {
+			log.Printf("Dispersion peer failed: %s: %v", peerURL, err)
+			c.cfg.ServerURL = savedURL
+			continue
+		}
+		c.peerConns = append(c.peerConns, c.conn)
+		log.Printf("Dispersion peer connected: %s (IP: %s)", peerURL, peerIP)
+		c.cfg.ServerURL = savedURL
+	}
 
 	// Wait for errors or stop signal
 	return c.waitForStop()
@@ -565,6 +585,9 @@ func (c *Client) stop() {
 	if c.conn != nil {
 		c.conn.Close()
 	}
+	for _, pc := range c.peerConns {
+		pc.Close()
+	}
 	if c.quicStream != nil {
 		c.quicStream.Close()
 	}
@@ -653,27 +676,44 @@ func (c *Client) connectWebSocket() (string, error) {
 		return "", fmt.Errorf("invalid server URL: %w", err)
 	}
 
-	hostname := u.Hostname()
+	realHost := u.Hostname()
+	connectHost := realHost
+	sniHost := realHost
+
+	// Domain fronting: TCP+TLS to CDN front, Host header to real server
+	if c.cfg.FrontDomain != "" {
+		fu, err := url.Parse(c.cfg.FrontDomain)
+		if err == nil {
+			connectHost = fu.Hostname()
+		} else {
+			connectHost = c.cfg.FrontDomain
+		}
+		sniHost = connectHost
+	}
+
 	port := u.Port()
 	if port == "" {
 		port = "443"
 	}
-	hostWithPort := net.JoinHostPort(hostname, port)
+	connectAddr := net.JoinHostPort(connectHost, port)
+	realAddr := net.JoinHostPort(realHost, port)
 
-	// Use ws:// scheme so gorilla doesn't perform TLS; uTLS does it via NetDial
-	wsURL := fmt.Sprintf("ws://%s/ws/%s", hostWithPort, c.cfg.UUID)
+	// Use ws:// scheme so gorilla doesn't do TLS; uTLS does it via NetDial.
+	// URL uses the REAL host for Host header; TCP+TLS goes to the front domain.
+	wsURL := fmt.Sprintf("ws://%s/ws/%s", realAddr, c.cfg.UUID)
 
 	dialer := websocket.Dialer{
 		HandshakeTimeout: 10 * time.Second,
 		NetDial: func(network, addr string) (net.Conn, error) {
-			tcpConn, err := net.DialTimeout(network, addr, 10*time.Second)
+			// Connect to front domain (or real server if no fronting)
+			tcpConn, err := net.DialTimeout(network, connectAddr, 10*time.Second)
 			if err != nil {
 				return nil, err
 			}
 
 			helloID := getUTLSClientHelloID(c.cfg.TLSFingerprint)
 			utlsConn := utls.UClient(tcpConn, &utls.Config{
-				ServerName: hostname,
+				ServerName: sniHost,
 			}, helloID)
 			if err := utlsConn.Handshake(); err != nil {
 				tcpConn.Close()
@@ -783,13 +823,19 @@ func (c *Client) sendPacket(data []byte) error {
 		if _, err := c.quicStream.Write(data); err != nil {
 			return fmt.Errorf("QUIC write: %w", err)
 		}
-	} else {
-		c.wsWriteMu.Lock()
-		err := c.conn.WriteMessage(websocket.BinaryMessage, data)
-		c.wsWriteMu.Unlock()
-		if err != nil {
-			return fmt.Errorf("WebSocket write: %w", err)
-		}
+		return nil
+	}
+
+	// Traffic dispersion: round-robin across all connections
+	idx := int(atomic.AddUint32(&c.sendIdx, 1))
+	allConns := append([]*websocket.Conn{c.conn}, c.peerConns...)
+	conn := allConns[idx%len(allConns)]
+
+	c.wsWriteMu.Lock()
+	err := conn.WriteMessage(websocket.BinaryMessage, data)
+	c.wsWriteMu.Unlock()
+	if err != nil {
+		return fmt.Errorf("WebSocket write: %w", err)
 	}
 	return nil
 }
