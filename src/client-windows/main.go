@@ -39,13 +39,12 @@ type Config struct {
 	UUID              string `json:"uuid"`
 	Reconnect         bool   `json:"reconnect"`
 	LogLevel          string `json:"log_level"`
-	Obfuscation       string `json:"obfuscation"`         // "on" or "off" (default: "on")
-	Transport         string `json:"transport"`
-	DNS               string `json:"dns"`
-	QUICSNI           string `json:"quic_sni"`            // Optional: override QUIC SNI
-	ObfuscationVersion int   `json:"obfuscation_version"` // 1=legacy 4-byte header, 2=new randomized header
-	TLSFingerprint    string `json:"tls_fingerprint"`     // Browser TLS fingerprint: chrome, firefox, ios, edge, random
-	TrafficShape      string `json:"traffic_shape"`       // Traffic shaping mode: off, jitter, browse, adaptive
+	Obfuscation    string `json:"obfuscation"`    // "on" or "off" (default: "on")
+	Transport      string `json:"transport"`
+	DNS            string `json:"dns"`
+	QUICSNI        string `json:"quic_sni"`        // Optional: override QUIC SNI
+	TLSFingerprint string `json:"tls_fingerprint"` // Browser TLS fingerprint: chrome, firefox, ios, edge, random
+	TrafficShape   string `json:"traffic_shape"`   // Traffic shaping mode: off, jitter, browse, adaptive
 }
 
 type Client struct {
@@ -662,7 +661,7 @@ func (c *Client) connectWebSocket() (string, error) {
 	hostWithPort := net.JoinHostPort(hostname, port)
 
 	// Use ws:// scheme so gorilla doesn't perform TLS; uTLS does it via NetDial
-	wsURL := fmt.Sprintf("ws://%s/ws/%s?ov=%d", hostWithPort, c.cfg.UUID, c.cfg.ObfuscationVersion)
+	wsURL := fmt.Sprintf("ws://%s/ws/%s", hostWithPort, c.cfg.UUID)
 
 	dialer := websocket.Dialer{
 		HandshakeTimeout: 10 * time.Second,
@@ -822,7 +821,7 @@ func (c *Client) forwardToServer() {
 
 		var send []byte
 		if obfuscationEnabled {
-			send = obfuscation.SimulateHTTPSPatternVersion(pkt, c.cfg.ObfuscationVersion)
+			send = obfuscation.SimulateHTTPSPattern(pkt)
 		} else {
 			send = pkt
 		}
@@ -874,7 +873,7 @@ func (c *Client) forwardFromServer() {
 			// Check obfuscation setting (string: "on"/"off")
 			obfuscationEnabled := (c.cfg.Obfuscation == "" || c.cfg.Obfuscation == "on" || c.cfg.Obfuscation == "true" || c.cfg.Obfuscation == "1")
 			if obfuscationEnabled {
-				if pb, err := obfuscation.RemovePaddingVersion(pkt, c.cfg.ObfuscationVersion); err == nil {
+				if pb, err := obfuscation.RemovePadding(pkt); err == nil {
 					pkt = pb
 				}
 			}
@@ -906,7 +905,7 @@ func (c *Client) forwardFromServer() {
 			// Check obfuscation setting (string: "on"/"off")
 			obfuscationEnabled := (c.cfg.Obfuscation == "" || c.cfg.Obfuscation == "on" || c.cfg.Obfuscation == "true" || c.cfg.Obfuscation == "1")
 			if obfuscationEnabled {
-				if pb, err := obfuscation.RemovePaddingVersion(data, c.cfg.ObfuscationVersion); err == nil {
+				if pb, err := obfuscation.RemovePadding(data); err == nil {
 					data = pb
 				}
 			}
@@ -1032,9 +1031,6 @@ func loadConfig(path string) (*Config, error) {
 	}
 
 	// Apply defaults
-	if cfg.ObfuscationVersion == 0 {
-		cfg.ObfuscationVersion = obfuscation.ObfuscationVersion1
-	}
 	if cfg.TLSFingerprint == "" {
 		cfg.TLSFingerprint = obfuscation.TLSFingerprintChrome
 	}

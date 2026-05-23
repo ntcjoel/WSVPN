@@ -46,12 +46,11 @@ type Config struct {
 	Reconnect         bool   `json:"reconnect"`
 	LogLevel          string `json:"log_level"`
 	LogDir            string `json:"log_dir"`
-	Obfuscation       bool   `json:"obfuscation"`
-	Transport         string `json:"transport"`          // websocket or quic
-	QUICSNI           string `json:"quic_sni"`           // SNI hostname for QUIC TLS (defaults to server hostname)
-	ObfuscationVersion int   `json:"obfuscation_version"` // 1=legacy 4-byte header, 2=new randomized header
-	TLSFingerprint    string `json:"tls_fingerprint"`    // Browser TLS fingerprint: chrome, firefox, ios, edge, random
-	TrafficShape      string `json:"traffic_shape"`      // Traffic shaping mode: off, jitter, browse, adaptive
+	Obfuscation    bool   `json:"obfuscation"`
+	Transport      string `json:"transport"`       // websocket or quic
+	QUICSNI        string `json:"quic_sni"`        // SNI hostname for QUIC TLS (defaults to server hostname)
+	TLSFingerprint string `json:"tls_fingerprint"` // Browser TLS fingerprint: chrome, firefox, ios, edge, random
+	TrafficShape   string `json:"traffic_shape"`   // Traffic shaping mode: off, jitter, browse, adaptive
 }
 
 // Client represents the WSVPN client
@@ -79,9 +78,6 @@ func loadConfig(path string) (*Config, error) {
 	}
 
 	// Apply defaults
-	if config.ObfuscationVersion == 0 {
-		config.ObfuscationVersion = obfuscation.ObfuscationVersion1
-	}
 	if config.TLSFingerprint == "" {
 		config.TLSFingerprint = obfuscation.TLSFingerprintChrome
 	}
@@ -198,7 +194,7 @@ func (c *Client) connectWebSocket() error {
 
 	// Use ws:// scheme (NOT wss://) so gorilla doesn't do TLS itself
 	// uTLS handshake is done in NetDial below
-	wsURL := fmt.Sprintf("ws://%s/ws/%s?ov=%d", hostWithPort, c.config.UUID, c.config.ObfuscationVersion)
+	wsURL := fmt.Sprintf("ws://%s/ws/%s", hostWithPort, c.config.UUID)
 
 	dialer := websocket.Dialer{
 		HandshakeTimeout: 10 * time.Second,
@@ -400,7 +396,7 @@ func (c *Client) forwardToServer() {
 		// Add obfuscation padding before sending
 		var sendData []byte
 		if c.config.Obfuscation {
-			sendData = obfuscation.SimulateHTTPSPatternVersion(packet, c.config.ObfuscationVersion)
+			sendData = obfuscation.SimulateHTTPSPattern(packet)
 		} else {
 			sendData = packet
 		}
@@ -465,7 +461,7 @@ func (c *Client) forwardFromWebSocket(buffer []byte) {
 		var packet []byte
 		if c.config.Obfuscation {
 			var err error
-			packet, err = obfuscation.RemovePaddingVersion(data, c.config.ObfuscationVersion)
+			packet, err = obfuscation.RemovePadding(data)
 			if err != nil {
 				structuredLog.Warn("obfuscation_remove", "Failed to remove padding from WebSocket data", map[string]interface{}{
 					"error": err.Error(),
@@ -505,7 +501,7 @@ func (c *Client) forwardFromQUIC(buffer []byte) {
 		var packet []byte
 		if c.config.Obfuscation {
 			var err error
-			packet, err = obfuscation.RemovePaddingVersion(buffer[:n], c.config.ObfuscationVersion)
+			packet, err = obfuscation.RemovePadding(buffer[:n])
 			if err != nil {
 				structuredLog.Warn("obfuscation_remove", "Failed to remove padding from QUIC data", map[string]interface{}{
 					"error": err.Error(),
