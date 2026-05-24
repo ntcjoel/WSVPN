@@ -1,4 +1,4 @@
-# WSVPN Server + Nginx Reverse Proxy
+# WSVPN Server
 # Usage: docker compose up -d
 
 services:
@@ -8,37 +8,13 @@ services:
     restart: unless-stopped
     cap_add:
       - NET_ADMIN
-    ports:
-      - "127.0.0.1:8180:8180"
+    network_mode: host
+    devices:
+      - /dev/net/tun:/dev/net/tun
     volumes:
       - ./config:/config:ro
-      - wsvpn_logs:/var/log/wsvpn
-    networks:
-      - wsvpn_net
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8180/ws/health"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8180/ws/health || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3
-
-  nginx:
-    image: nginx:alpine
-    container_name: wsvpn-nginx
-    restart: unless-stopped
-    ports:
-      - "443:443"
-      - "80:80"
-    volumes:
-      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
-      - ./nginx/ssl:/etc/nginx/ssl:ro
-      - ./nginx/html:/var/www/html:ro
-    depends_on:
-      - wsvpn
-    networks:
-      - wsvpn_net
-
-volumes:
-  wsvpn_logs:
-
-networks:
-  wsvpn_net:
