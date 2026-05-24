@@ -571,10 +571,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Auto-adjust TUN MTU for protocol overhead
-	tunMTU := 1280
-	if err := netlink.LinkSetMTU(link, tunMTU); err != nil {
-		structuredLog.Warn("tun_mtu", "Failed to set TUN MTU", map[string]interface{}{"error": err.Error()})
+	// Auto-adjust TUN MTU when obfuscation is enabled (avoids outer-layer fragmentation)
+	tunMTU := 1500
+	if config.Obfuscation {
+		tunMTU = 1200
+		if err := netlink.LinkSetMTU(link, tunMTU); err != nil {
+			structuredLog.Warn("tun_mtu", "Failed to set TUN MTU", map[string]interface{}{"error": err.Error()})
+		}
 	}
 
 	// Set IP address

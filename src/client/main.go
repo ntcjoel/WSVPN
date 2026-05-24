@@ -56,7 +56,6 @@ type Config struct {
 	TrafficShape       string   `json:"traffic_shape"`       // Traffic shaping mode: off, jitter, browse, adaptive
 	FrontDomain        string   `json:"front_domain"`        // CDN front domain for domain fronting: SNI=front, Host=real
 	DispersionPeers    []string `json:"dispersion_peers"`    // Additional server URLs for traffic dispersion
-	ConnectionLifetime int      `json:"connection_lifetime"` // Max connection lifetime in seconds (0=disabled)
 	TrafficInduction   bool     `json:"traffic_induction"`   // Generate fake browsing noise during idle
 	InductionDomains   []string `json:"induction_domains"`   // Domains to use for traffic induction
 }
@@ -73,7 +72,6 @@ type Client struct {
 	shape       *obfuscation.ShaperState
 	peerConns   []*websocket.Conn // Extra connections for traffic dispersion
 	sendIdx     uint32             // Atomic counter for round-robin sending
-	lifetimeCh  chan struct{}      // Close to trigger connection lifetime rotation
 	inductionCh chan struct{}      // Close to stop traffic induction
 }
 
@@ -149,18 +147,14 @@ func (c *Client) initTUN() error {
 		return fmt.Errorf("failed to bring up interface: %w", err)
 	}
 
-	// Auto-adjust TUN MTU: physical (1500) minus obfuscation + transport overhead.
-	// Obfuscation header(4) + max padding(500) + WebSocket frame(10) + TLS record(29) = 543
-	// Using a safe 1280 which works for nearly all paths.
-	tunMTU := 1280
-	if err := netlink.LinkSetMTU(link, tunMTU); err != nil {
-		structuredLog.Warn("tun_mtu", "Failed to set TUN MTU, using default", map[string]interface{}{
-			"error": err.Error(),
-		})
-	} else {
-		structuredLog.Info("tun_mtu", "TUN MTU adjusted", map[string]interface{}{
-			"mtu": tunMTU,
-		})
+	// Auto-adjust TUN MTU when obfuscation is enabled to avoid outer-layer fragmentation.
+	// Overhead: header(4) + max_padding(500) + WS_frame(10) + TLS_record(29) = 543.
+	// 1500 - 543 = 957. With smart ACK padding, 1200 is safe for the common case.
+	if c.config.Obfuscation {
+		tunMTU := 1200
+		if err := netlink.LinkSetMTU(link, tunMTU); err != nil {
+			structuredLog.Warn("tun_mtu", "Failed to set TUN MTU", nil)
+		}
 	}
 
 	// Set IP address
@@ -572,7 +566,7 @@ func (c *Client) forwardFromQUIC(buffer []byte) {
 }
 
 // reconnect implements reconnection logic with exponential backoff.
-// It is called both on connection loss and on scheduled lifetime rotation.
+// It is called on connection loss.
 func (c *Client) reconnect() {
 	backoff := 1 * time.Second
 	maxBackoff := 30 * time.Second
@@ -608,10 +602,7 @@ func (c *Client) reconnect() {
 		go c.forwardToServer()
 		go c.forwardFromServer()
 		go c.irregularHeartbeat()
-		if c.config.ConnectionLifetime > 0 {
-			c.lifetimeCh = make(chan struct{})
-			go c.connectionLifetimeLoop()
-		}
+
 		if c.config.TrafficInduction {
 			c.inductionCh = make(chan struct{})
 			go c.trafficInductionLoop()
@@ -667,11 +658,7 @@ func (c *Client) start() error {
 	// Start irregular heartbeat (DPI evasion)
 	go c.irregularHeartbeat()
 
-	// Connection lifetime rotation — periodically disconnect/reconnect with fresh fingerprint
-	if c.config.ConnectionLifetime > 0 {
-		c.lifetimeCh = make(chan struct{})
-		go c.connectionLifetimeLoop()
-	}
+
 
 	// Traffic induction — generate fake browsing noise during idle
 	if c.config.TrafficInduction {
@@ -680,34 +667,6 @@ func (c *Client) start() error {
 	}
 
 	return nil
-}
-
-// connectionLifetimeLoop periodically triggers a reconnect with rotated TLS fingerprint.
-// This simulates "user closed the site and reopened it later" — breaking the long-connection
-// signature that DPI devices use to identify VPN tunnels.
-func (c *Client) connectionLifetimeLoop() {
-	d := time.Duration(c.config.ConnectionLifetime) * time.Second
-	ticker := time.NewTicker(d)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			structuredLog.Info("lifetime_rotate", "Connection lifetime reached, rotating identity", nil)
-			// Rotate to a different TLS fingerprint
-			c.config.TLSFingerprint = obfuscation.TLSFingerprintRandom
-			// Trigger reconnect
-			c.running = false
-			close(c.stopCh)
-			if c.conn != nil {
-				c.conn.Close()
-			}
-			go c.reconnect()
-			return
-		case <-c.lifetimeCh:
-			return
-		}
-	}
 }
 
 // trafficInductionLoop generates lightweight fake HTTP requests to random public sites
@@ -800,9 +759,6 @@ func (c *Client) irregularHeartbeat() {
 func (c *Client) stop() {
 	c.running = false
 	close(c.stopCh)
-	if c.lifetimeCh != nil {
-		close(c.lifetimeCh)
-	}
 	if c.inductionCh != nil {
 		close(c.inductionCh)
 	}

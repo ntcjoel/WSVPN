@@ -49,7 +49,6 @@ type Config struct {
 	TrafficShape   string `json:"traffic_shape"`   // Traffic shaping mode: off, jitter, browse, adaptive
 	FrontDomain        string   `json:"front_domain"`        // CDN front domain for domain fronting: SNI=front, Host=real
 	DispersionPeers    []string `json:"dispersion_peers"`    // Additional server URLs for traffic dispersion
-	ConnectionLifetime int      `json:"connection_lifetime"` // Max connection lifetime in seconds (0=disabled)
 	TrafficInduction   bool     `json:"traffic_induction"`   // Generate fake browsing noise during idle
 	InductionDomains   []string `json:"induction_domains"`   // Domains to use for traffic induction
 }
@@ -70,7 +69,6 @@ type Client struct {
 	shape       *obfuscation.ShaperState // Traffic shaper
 	peerConns   []*websocket.Conn        // Extra connections for traffic dispersion
 	sendIdx     uint32                    // Atomic counter for round-robin sending
-	lifetimeCh  chan struct{}             // Close to trigger connection lifetime rotation
 	inductionCh chan struct{}             // Close to stop traffic induction
 }
 
@@ -572,10 +570,6 @@ func (c *Client) start() error {
 	}
 
 	// Connection lifetime rotation
-	if c.cfg.ConnectionLifetime > 0 {
-		c.lifetimeCh = make(chan struct{})
-		go c.connectionLifetimeLoop()
-	}
 
 	// Traffic induction
 	if c.cfg.TrafficInduction {
@@ -593,9 +587,6 @@ func (c *Client) stop() {
 	c.setRunning(false)
 
 	close(c.stopCh)
-	if c.lifetimeCh != nil {
-		close(c.lifetimeCh)
-	}
 	if c.inductionCh != nil {
 		close(c.inductionCh)
 	}
@@ -1014,26 +1005,6 @@ func (c *Client) sendError(err error) {
 // ---------------------------------------------------
 
 // connectionLifetimeLoop triggers reconnect via the main loop by closing the current connection.
-func (c *Client) connectionLifetimeLoop() {
-	d := time.Duration(c.cfg.ConnectionLifetime) * time.Second
-	ticker := time.NewTicker(d)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			log.Printf("Connection lifetime reached, rotating identity")
-			c.cfg.TLSFingerprint = obfuscation.TLSFingerprintRandom
-			// Close connection to trigger the main loop's reconnect logic
-			if c.conn != nil {
-				c.conn.Close()
-			}
-			return
-		case <-c.lifetimeCh:
-			return
-		}
-	}
-}
 
 // trafficInductionLoop generates lightweight fake HTTP requests during idle.
 func (c *Client) trafficInductionLoop() {
