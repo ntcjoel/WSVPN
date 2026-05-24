@@ -234,20 +234,7 @@ server {
 
 ## Chrome Extension
 
-`extension/` contains a Chrome extension that routes traffic through the VPN SOCKS5 proxy using PAC (Proxy Auto-Config) scripting.
-
-### Features
-
-- Route China mainland IP ranges through the VPN
-- Route LAN addresses through the VPN
-- Custom CIDR ranges
-- One-click enable/disable from toolbar popup
-
-### Install
-
-1. Chrome → `chrome://extensions` → Developer mode ON
-2. Load unpacked → select `extension/` directory
-3. Click toolbar icon to configure
+Smart PAC-based routing extension. See [`extension/README.md`](extension/README.md) for install and configuration details.
 
 ---
 

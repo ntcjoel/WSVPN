@@ -112,7 +112,7 @@ func (s *Server) HandleHealth(w http.ResponseWriter, r *http.Request) {
 
 	// Set response headers
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("X-WSVPN-Version", "0.3")
+	w.Header().Set("X-WSVPN-Version", Version)
 
 	// Encode response
 	if err := json.NewEncoder(w).Encode(response); err != nil {

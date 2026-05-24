@@ -136,7 +136,7 @@ func loadWintunDriver() error {
 // Main & CLI parsing
 // ---------------------------------------------------
 
-const Version = "v1.0"
+const Version = "v1.2"
 
 func showHelp() {
 	fmt.Println("WSVPN Windows Client " + Version)
