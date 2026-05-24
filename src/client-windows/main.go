@@ -287,7 +287,7 @@ func (c *Client) runConnection() error {
 		return fmt.Errorf("resolve server IP: %w", err)
 	}
 	c.serverIP = serverIP
-	log.Printf("Server IP resolved: %s", serverIP)
+	log.Printf("Server resolved")
 
 	// Connect to get assigned IP
 	assignedIP, err := c.connect()
@@ -591,11 +591,10 @@ func (c *Client) stop() {
 		close(c.inductionCh)
 	}
 
-	// Cleanup routes
+	// Cleanup routes — only remove the server-specific host route, never touch default routes
 	if c.serverIP != "" {
 		runRouteDelete(c.serverIP, "255.255.255.255")
 	}
-	runRouteDelete("0.0.0.0", "0.0.0.0")
 
 	if c.conn != nil {
 		c.conn.Close()
