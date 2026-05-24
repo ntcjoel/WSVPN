@@ -571,6 +571,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Auto-adjust TUN MTU for protocol overhead
+	tunMTU := 1280
+	if err := netlink.LinkSetMTU(link, tunMTU); err != nil {
+		structuredLog.Warn("tun_mtu", "Failed to set TUN MTU", map[string]interface{}{"error": err.Error()})
+	}
+
 	// Set IP address
 	addr, err := netlink.ParseAddr(config.ServerIP + "/24")
 	if err != nil {
@@ -590,6 +596,7 @@ func main() {
 	structuredLog.Info("tun_init", "TUN interface initialized", map[string]interface{}{
 		"name": config.Name,
 		"ip":   config.ServerIP,
+		"mtu":  tunMTU,
 	})
 
 	// Start WebSocket server (TCP) - backward compatible with V0.3

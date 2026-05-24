@@ -7,7 +7,9 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	mrand "math/rand"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"runtime"
@@ -51,9 +53,12 @@ type Config struct {
 	Transport      string `json:"transport"`       // websocket or quic
 	QUICSNI        string `json:"quic_sni"`        // SNI hostname for QUIC TLS (defaults to server hostname)
 	TLSFingerprint string `json:"tls_fingerprint"` // Browser TLS fingerprint: chrome, firefox, ios, edge, random
-	TrafficShape    string   `json:"traffic_shape"`    // Traffic shaping mode: off, jitter, browse, adaptive
-	FrontDomain     string   `json:"front_domain"`     // CDN front domain for domain fronting: SNI=front, Host=real
-	DispersionPeers []string `json:"dispersion_peers"` // Additional server URLs for traffic dispersion
+	TrafficShape       string   `json:"traffic_shape"`       // Traffic shaping mode: off, jitter, browse, adaptive
+	FrontDomain        string   `json:"front_domain"`        // CDN front domain for domain fronting: SNI=front, Host=real
+	DispersionPeers    []string `json:"dispersion_peers"`    // Additional server URLs for traffic dispersion
+	ConnectionLifetime int      `json:"connection_lifetime"` // Max connection lifetime in seconds (0=disabled)
+	TrafficInduction   bool     `json:"traffic_induction"`   // Generate fake browsing noise during idle
+	InductionDomains   []string `json:"induction_domains"`   // Domains to use for traffic induction
 }
 
 // Client represents the WSVPN client
@@ -65,9 +70,11 @@ type Client struct {
 	quicStream *quic.Stream
 	running    bool
 	stopCh     chan struct{}
-	shape      *obfuscation.ShaperState
-	peerConns  []*websocket.Conn // Extra connections for traffic dispersion
-	sendIdx    uint32             // Atomic counter for round-robin sending
+	shape       *obfuscation.ShaperState
+	peerConns   []*websocket.Conn // Extra connections for traffic dispersion
+	sendIdx     uint32             // Atomic counter for round-robin sending
+	lifetimeCh  chan struct{}      // Close to trigger connection lifetime rotation
+	inductionCh chan struct{}      // Close to stop traffic induction
 }
 
 // loadConfig loads configuration from JSON file
@@ -140,6 +147,20 @@ func (c *Client) initTUN() error {
 
 	if err := netlink.LinkSetUp(link); err != nil {
 		return fmt.Errorf("failed to bring up interface: %w", err)
+	}
+
+	// Auto-adjust TUN MTU: physical (1500) minus obfuscation + transport overhead.
+	// Obfuscation header(4) + max padding(500) + WebSocket frame(10) + TLS record(29) = 543
+	// Using a safe 1280 which works for nearly all paths.
+	tunMTU := 1280
+	if err := netlink.LinkSetMTU(link, tunMTU); err != nil {
+		structuredLog.Warn("tun_mtu", "Failed to set TUN MTU, using default", map[string]interface{}{
+			"error": err.Error(),
+		})
+	} else {
+		structuredLog.Info("tun_mtu", "TUN MTU adjusted", map[string]interface{}{
+			"mtu": tunMTU,
+		})
 	}
 
 	// Set IP address
@@ -550,18 +571,25 @@ func (c *Client) forwardFromQUIC(buffer []byte) {
 	}
 }
 
-// reconnect implements reconnection logic with exponential backoff
+// reconnect implements reconnection logic with exponential backoff.
+// It is called both on connection loss and on scheduled lifetime rotation.
 func (c *Client) reconnect() {
 	backoff := 1 * time.Second
 	maxBackoff := 30 * time.Second
 
-	for c.running {
+	for {
 		structuredLog.Info("reconnect_wait", "Attempting to reconnect", map[string]interface{}{
 			"backoff": backoff.String(),
 		})
 		time.Sleep(backoff)
 
+		// Reset running state and stopCh for a fresh connection cycle
+		c.running = true
+		c.stopCh = make(chan struct{})
+		c.shape = obfuscation.NewShaperState(c.config.TrafficShape)
+
 		if err := c.connect(); err != nil {
+			c.running = false
 			structuredLog.Warn("reconnect_fail", "Reconnection failed", map[string]interface{}{
 				"error": err.Error(),
 			})
@@ -578,11 +606,24 @@ func (c *Client) reconnect() {
 
 		// Restart packet forwarding
 		go c.forwardToServer()
+		go c.forwardFromServer()
+		go c.irregularHeartbeat()
+		if c.config.ConnectionLifetime > 0 {
+			c.lifetimeCh = make(chan struct{})
+			go c.connectionLifetimeLoop()
+		}
+		if c.config.TrafficInduction {
+			c.inductionCh = make(chan struct{})
+			go c.trafficInductionLoop()
+		}
+
 		c.forwardFromServer()
+		return
 	}
 }
 
 // start begins the VPN client operation
+
 func (c *Client) start() error {
 	c.running = true
 	c.stopCh = make(chan struct{})
@@ -626,7 +667,101 @@ func (c *Client) start() error {
 	// Start irregular heartbeat (DPI evasion)
 	go c.irregularHeartbeat()
 
+	// Connection lifetime rotation — periodically disconnect/reconnect with fresh fingerprint
+	if c.config.ConnectionLifetime > 0 {
+		c.lifetimeCh = make(chan struct{})
+		go c.connectionLifetimeLoop()
+	}
+
+	// Traffic induction — generate fake browsing noise during idle
+	if c.config.TrafficInduction {
+		c.inductionCh = make(chan struct{})
+		go c.trafficInductionLoop()
+	}
+
 	return nil
+}
+
+// connectionLifetimeLoop periodically triggers a reconnect with rotated TLS fingerprint.
+// This simulates "user closed the site and reopened it later" — breaking the long-connection
+// signature that DPI devices use to identify VPN tunnels.
+func (c *Client) connectionLifetimeLoop() {
+	d := time.Duration(c.config.ConnectionLifetime) * time.Second
+	ticker := time.NewTicker(d)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			structuredLog.Info("lifetime_rotate", "Connection lifetime reached, rotating identity", nil)
+			// Rotate to a different TLS fingerprint
+			c.config.TLSFingerprint = obfuscation.TLSFingerprintRandom
+			// Trigger reconnect
+			c.running = false
+			close(c.stopCh)
+			if c.conn != nil {
+				c.conn.Close()
+			}
+			go c.reconnect()
+			return
+		case <-c.lifetimeCh:
+			return
+		}
+	}
+}
+
+// trafficInductionLoop generates lightweight fake HTTP requests to random public sites
+// during idle periods. This creates background noise that makes the connection look like
+// normal multi-site browsing rather than a single persistent tunnel.
+func (c *Client) trafficInductionLoop() {
+	defaultDomains := []string{
+		"http://httpbin.org/get",
+		"http://example.com",
+		"http://httpstat.us/200",
+	}
+	domains := c.config.InductionDomains
+	if len(domains) == 0 {
+		domains = defaultDomains
+	}
+
+	for {
+		// Random interval: 30s to 5min
+		interval := 30 + time.Duration(mrand.Int63n(270)) * time.Second
+
+		select {
+		case <-time.After(interval):
+			if !c.running {
+				return
+			}
+			// Pick a random domain and make a lightweight GET request
+			url := domains[mrand.Intn(len(domains))]
+			resp, err := httpGet(url)
+			if err != nil {
+				structuredLog.Debug("induction", "Induction request failed", map[string]interface{}{
+					"url":   url,
+					"error": err.Error(),
+				})
+				continue
+			}
+			if resp != nil {
+				resp.Body.Close()
+			}
+		case <-c.inductionCh:
+			return
+		}
+	}
+}
+
+// httpGet performs a lightweight HTTP GET through the VPN tunnel.
+// We use the system's default HTTP client — the request goes through the TUN interface.
+func httpGet(url string) (*http.Response, error) {
+	client := &http.Client{Timeout: 15 * time.Second}
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+	return client.Do(req)
 }
 
 // irregularHeartbeat sends ping messages at irregular intervals (WebSocket only)
@@ -665,6 +800,12 @@ func (c *Client) irregularHeartbeat() {
 func (c *Client) stop() {
 	c.running = false
 	close(c.stopCh)
+	if c.lifetimeCh != nil {
+		close(c.lifetimeCh)
+	}
+	if c.inductionCh != nil {
+		close(c.inductionCh)
+	}
 	if c.conn != nil {
 		c.conn.Close()
 	}

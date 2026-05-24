@@ -11,5 +11,8 @@
   "tls_fingerprint": "chrome",
   "traffic_shape": "off",
   "front_domain": "",
-  "dispersion_peers": []
+  "dispersion_peers": [],
+  "connection_lifetime": 0,
+  "traffic_induction": false,
+  "induction_domains": []
 }

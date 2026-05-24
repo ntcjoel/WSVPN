@@ -53,7 +53,17 @@ Burst/pause state machine breaks the continuous-stream VPN signature:
 | `browse` | Burst (10–50 packets) → 30% chance of 2–8s pause |
 | `adaptive` | Reserved for future ML-driven patterns |
 
-### Layer 3 — Randomized Packet Obfuscation
+### Layer 3 — Smart Packet Obfuscation
+
+Packets are padded to HTTPS-typical sizes (64/256/1024/1480 bytes, weighted distribution). Pure TCP ACKs are detected and left with minimal padding — real TLS connections also have small ACK frames, so this is behaviorally realistic. Each header contains 2 bytes of crypto-random data.
+
+### Layer 4 — Connection Churn
+
+Long-lived connections (hours) are a statistical outlier for HTTPS. WSVPN supports timed connection rotation: disconnect and reconnect with a fresh TLS fingerprint at a configurable interval, simulating "the user closed this tab and came back later."
+
+### Layer 5 — Traffic Induction
+
+Generates lightweight background HTTP requests to public websites at random intervals (30s–5min) during idle. This creates browsing noise that masks the tunnel's traffic pattern.
 
 Packets are padded to HTTPS-typical sizes (64/256/1024/1480 bytes, weighted distribution). Each header contains 2 bytes of crypto-random data — no two packets have the same header pattern.
 
@@ -156,6 +166,9 @@ ssh user@server "cd ~/wsvpn && nohup ./wsvpn-server > server.log 2>&1 &"
   "traffic_shape": "browse",
   "front_domain": "",
   "dispersion_peers": [],
+  "connection_lifetime": 0,
+  "traffic_induction": false,
+  "induction_domains": [],
   "quic_sni": "your-domain.com"
 }
 ```
@@ -166,6 +179,9 @@ ssh user@server "cd ~/wsvpn && nohup ./wsvpn-server > server.log 2>&1 &"
 | `traffic_shape` | `"off"` | Traffic shaping mode |
 | `front_domain` | `""` | CDN front domain for domain fronting |
 | `dispersion_peers` | `[]` | Additional server URLs for traffic dispersion |
+| `connection_lifetime` | `0` | Max connection lifetime in seconds (0=disabled) |
+| `traffic_induction` | `false` | Generate fake browsing noise during idle |
+| `induction_domains` | `[]` | Domains for induction (defaults: httpbin, example) |
 
 ### Domain Fronting
 

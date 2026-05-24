@@ -68,9 +68,43 @@ func GetHeartbeatInterval() time.Duration {
 	return time.Duration(seconds) * time.Second
 }
 
+// isPureACK checks if an IPv4 packet is a pure TCP ACK (no data, just header).
+// Pure ACKs are 40 bytes: 20 IP + 20 TCP. Padding them is wasteful — real HTTPS
+// connections carry similarly small TLS ACKs, so leaving them small is realistic.
+func isPureACK(packet []byte) bool {
+	if len(packet) < 40 || (packet[0]>>4) != 4 {
+		return false
+	}
+	ipLen := int(packet[2])<<8 | int(packet[3])
+	if ipLen != len(packet) {
+		return false
+	}
+	if packet[9] != 6 { // TCP protocol
+		return false
+	}
+	ihl := int(packet[0]&0x0f) * 4
+	if ihl < 20 {
+		return false
+	}
+	tcpOffset := int((packet[ihl+12] >> 4) * 4)
+	return ipLen == ihl+tcpOffset
+}
+
 // SimulateHTTPSPattern pads packet to match typical HTTPS traffic size distribution.
+// Pure TCP ACKs are passed through with minimal padding — real TLS ACKs are small.
 // Uses randomized header format: [uint16_be(len)][2 random bytes][payload][padding].
 func SimulateHTTPSPattern(packet []byte) []byte {
+	if isPureACK(packet) {
+		// Minimal padding: just the 4-byte randomized header, no extra padding.
+		// Small frames are normal in HTTPS (TLS ACKs, keepalive).
+		result := make([]byte, paddingHeaderLen+len(packet))
+		binary.BigEndian.PutUint16(result, uint16(len(packet)))
+		randBytes := make([]byte, 2)
+		rand.Read(randBytes)
+		copy(result[2:4], randBytes)
+		copy(result[paddingHeaderLen:], packet)
+		return result
+	}
 	sizes := []int{64, 256, 1024, 1480}
 	weights := []float64{0.20, 0.30, 0.25, 0.25}
 

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -46,8 +47,11 @@ type Config struct {
 	QUICSNI        string `json:"quic_sni"`        // Optional: override QUIC SNI
 	TLSFingerprint string `json:"tls_fingerprint"` // Browser TLS fingerprint: chrome, firefox, ios, edge, random
 	TrafficShape   string `json:"traffic_shape"`   // Traffic shaping mode: off, jitter, browse, adaptive
-	FrontDomain     string   `json:"front_domain"`     // CDN front domain for domain fronting: SNI=front, Host=real
-	DispersionPeers []string `json:"dispersion_peers"` // Additional server URLs for traffic dispersion
+	FrontDomain        string   `json:"front_domain"`        // CDN front domain for domain fronting: SNI=front, Host=real
+	DispersionPeers    []string `json:"dispersion_peers"`    // Additional server URLs for traffic dispersion
+	ConnectionLifetime int      `json:"connection_lifetime"` // Max connection lifetime in seconds (0=disabled)
+	TrafficInduction   bool     `json:"traffic_induction"`   // Generate fake browsing noise during idle
+	InductionDomains   []string `json:"induction_domains"`   // Domains to use for traffic induction
 }
 
 type Client struct {
@@ -63,9 +67,11 @@ type Client struct {
 	errCh      chan error
 	serverIP   string
 	wsWriteMu  sync.Mutex               // Protect WebSocket writes (CRITICAL FIX #1)
-	shape     *obfuscation.ShaperState // Traffic shaper
-	peerConns []*websocket.Conn        // Extra connections for traffic dispersion
-	sendIdx   uint32                    // Atomic counter for round-robin sending
+	shape       *obfuscation.ShaperState // Traffic shaper
+	peerConns   []*websocket.Conn        // Extra connections for traffic dispersion
+	sendIdx     uint32                    // Atomic counter for round-robin sending
+	lifetimeCh  chan struct{}             // Close to trigger connection lifetime rotation
+	inductionCh chan struct{}             // Close to stop traffic induction
 }
 
 // ---------------------------------------------------
@@ -565,6 +571,18 @@ func (c *Client) start() error {
 		go c.irregularHeartbeat()
 	}
 
+	// Connection lifetime rotation
+	if c.cfg.ConnectionLifetime > 0 {
+		c.lifetimeCh = make(chan struct{})
+		go c.connectionLifetimeLoop()
+	}
+
+	// Traffic induction
+	if c.cfg.TrafficInduction {
+		c.inductionCh = make(chan struct{})
+		go c.trafficInductionLoop()
+	}
+
 	return nil
 }
 
@@ -575,6 +593,12 @@ func (c *Client) stop() {
 	c.setRunning(false)
 
 	close(c.stopCh)
+	if c.lifetimeCh != nil {
+		close(c.lifetimeCh)
+	}
+	if c.inductionCh != nil {
+		close(c.inductionCh)
+	}
 
 	// Cleanup routes
 	if c.serverIP != "" {
@@ -988,6 +1012,68 @@ func (c *Client) sendError(err error) {
 // ---------------------------------------------------
 // Heartbeat (WebSocket only)
 // ---------------------------------------------------
+
+// connectionLifetimeLoop triggers reconnect via the main loop by closing the current connection.
+func (c *Client) connectionLifetimeLoop() {
+	d := time.Duration(c.cfg.ConnectionLifetime) * time.Second
+	ticker := time.NewTicker(d)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			log.Printf("Connection lifetime reached, rotating identity")
+			c.cfg.TLSFingerprint = obfuscation.TLSFingerprintRandom
+			// Close connection to trigger the main loop's reconnect logic
+			if c.conn != nil {
+				c.conn.Close()
+			}
+			return
+		case <-c.lifetimeCh:
+			return
+		}
+	}
+}
+
+// trafficInductionLoop generates lightweight fake HTTP requests during idle.
+func (c *Client) trafficInductionLoop() {
+	domains := c.cfg.InductionDomains
+	if len(domains) == 0 {
+		domains = []string{"http://httpbin.org/get", "http://example.com", "http://httpstat.us/200"}
+	}
+
+	for {
+		interval := 30 + time.Duration(time.Now().UnixNano()%270)*time.Second
+
+		select {
+		case <-time.After(interval):
+			if !c.isRunning() {
+				return
+			}
+			url := domains[time.Now().UnixNano()%int64(len(domains))]
+			resp, err := httpGet(url)
+			if err != nil {
+				continue
+			}
+			if resp != nil {
+				resp.Body.Close()
+			}
+		case <-c.inductionCh:
+			return
+		}
+	}
+}
+
+// httpGet performs a lightweight HTTP GET through the VPN tunnel.
+func httpGet(url string) (*http.Response, error) {
+	client := &http.Client{Timeout: 15 * time.Second}
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+	return client.Do(req)
+}
 
 func (c *Client) irregularHeartbeat() {
 	for {
