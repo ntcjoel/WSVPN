@@ -145,20 +145,22 @@ func showHelp() {
 	fmt.Println("WSVPN Windows Client " + Version)
 	fmt.Println("")
 	fmt.Println("Usage:")
-	fmt.Println("  wsvpn-client.exe              Start VPN (default)")
-	fmt.Println("  wsvpn-client.exe -config F    Start with config file")
-	fmt.Println("  wsvpn-client.exe disconnect   Stop VPN")
+	fmt.Println("  wsvpn-client.exe              GUI mode (systray, default)")
+	fmt.Println("  wsvpn-client.exe -cli         CLI mode (terminal)")
+	fmt.Println("  wsvpn-client.exe -config F    CLI mode with config file")
 	fmt.Println("  wsvpn-client.exe -version     Show version")
 	fmt.Println("  wsvpn-client.exe -help        Show this help")
 }
 
 func main() {
-	cmd := "connect"
-	if len(os.Args) > 1 {
-		cmd = os.Args[1]
+	// GUI mode by default (systray icon in taskbar)
+	if len(os.Args) < 2 {
+		runGUI(findConfig())
+		return
 	}
 
-	// Global flags
+	cmd := os.Args[1]
+
 	if cmd == "-h" || cmd == "--help" || cmd == "-help" || cmd == "help" {
 		showHelp()
 		os.Exit(0)
@@ -168,13 +170,18 @@ func main() {
 		return
 	}
 
+	// CLI mode with -cli flag
+	if cmd == "-cli" {
+		connectCmd()
+		return
+	}
+
 	switch cmd {
 	case "connect", "-config":
 		connectCmd()
 	case "disconnect":
 		disconnectCmd()
 	default:
-		// Treat unknown arg as config file path
 		os.Setenv("WSVPN_CONFIG", os.Args[1])
 		connectCmd()
 	}
@@ -211,7 +218,6 @@ func connectCmd() {
 		if (a == "-config" || a == "--config") && i+1 < len(os.Args) {
 			cfgPath = os.Args[i+1]
 		}
-	}
 	}
 
 	// Load Wintun driver first
