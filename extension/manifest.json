@@ -2,20 +2,21 @@
   "manifest_version": 3,
   "name": "WSVPN Proxy",
   "version": "1.2",
-  "description": "Smart routing through WSVPN — bypass specified regions and custom CIDR ranges.",
-  "permissions": [
-    "proxy",
-    "storage",
-    "alarms"
-  ],
-  "host_permissions": [
-    "<all_urls>"
-  ],
+  "description": "Smart PAC-based routing through WSVPN — bypass China mainland, LAN, and custom CIDR ranges.",
+  "permissions": ["proxy", "storage", "alarms"],
+  "host_permissions": ["<all_urls>"],
   "action": {
     "default_popup": "popup.html",
-    "default_title": "WSVPN"
+    "default_title": "WSVPN",
+    "default_icon": {
+      "16": "icon16.png",
+      "48": "icon48.png",
+      "128": "icon128.png"
+    }
   },
   "icons": {
+    "16": "icon16.png",
+    "48": "icon48.png",
     "128": "icon128.png"
   },
   "background": {

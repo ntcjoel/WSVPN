@@ -1,51 +1,45 @@
 # WSVPN Chrome Extension
 
-Smart routing extension that directs traffic through the WSVPN SOCKS5 proxy.
+Smart PAC-based proxy routing extension.
 
 ## Features
 
-- **China mainland IP bypass**: Routes traffic to Chinese IPs through the VPN
-- **LAN bypass**: Routes LAN addresses (10.x, 192.168.x, 172.16.x) through the VPN
-- **Custom CIDR**: User-defined IP ranges to route through the VPN
-- **One-click toggle**: Enable/disable from the popup
-- **PAC-based routing**: Uses Chrome Proxy API for efficient, declarative routing
+- Green/gray status indicator (online/offline)
+- Configurable proxy host and port
+- China mainland IP bypass
+- LAN IP bypass
+- Custom CIDR ranges
+- No data collection — all settings local
 
-## Installation
+## Install (Developer Mode)
 
-1. Open Chrome and go to `chrome://extensions`
-2. Enable "Developer mode" (top right)
-3. Click "Load unpacked" and select the `extension/` directory
-4. The WSVPN icon appears in the toolbar
-5. Click the icon to configure routing rules
+1. Open `chrome://extensions`
+2. Enable "Developer mode"
+3. Click "Load unpacked" → select the `extension/` directory
 
-## Configuration
+## Publish to Chrome Web Store
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| Proxy host | 10.9.1.1 | WSVPN server VPN IP |
-| Proxy port | 1744 | SOCKS5 proxy port |
-| China bypass | On | Route China IPs through VPN |
-| LAN bypass | On | Route LAN IPs through VPN |
-| Custom CIDR | — | User-defined IP ranges |
+1. Register at https://chrome.google.com/webstore/devconsole ($5 one-time fee)
+2. Zip the extension directory: `zip -r wsvpn-proxy.zip extension/ -x "*.md"`
+3. Upload to Chrome Web Store Developer Dashboard
+4. Fill in store listing using `store-listing.md`
+5. Submit for review (typically 1-3 business days)
 
-## How It Works
+## Files
 
-The extension uses Chrome's PAC (Proxy Auto-Config) scripting to:
-1. Check if the destination IP falls within configured CIDR ranges
-2. If yes → route through SOCKS5 proxy (WSVPN tunnel)
-3. If no → direct connection
-
-All other traffic goes directly — only specified ranges use the VPN.
-
-## Updating China IP List
-
-The China IP list is embedded in `background.js` (CHINA_CIDR array).
-To update with the latest IP allocations:
-
-```bash
-curl http://www.ipdeny.com/ipblocks/data/countries/cn.zone | while read cidr; do
-  echo "'$cidr',"
-done
 ```
-
-Paste the output into the CHINA_CIDR array in `background.js`.
+extension/
+├── manifest.json        # Manifest V3
+├── background.js        # Service worker: PAC, health check, icon
+├── popup.html           # Settings UI
+├── popup.js             # UI logic
+├── icon16.png           # Green circle (16px)
+├── icon16-off.png       # Gray circle (16px)
+├── icon48.png           # Green circle (48px)
+├── icon48-off.png       # Gray circle (48px)
+├── icon128.png          # Green circle (128px)
+├── icon128-off.png      # Gray circle (128px)
+├── privacy.md           # Privacy policy
+├── store-listing.md     # Store listing draft
+└── README.md
+```

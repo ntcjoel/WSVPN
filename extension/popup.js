@@ -1,19 +1,13 @@
 // Popup script for WSVPN Chrome Extension
 
 const DEFAULTS = {
-  enabled: true,
-  proxyHost: '10.9.1.1',
-  proxyPort: 1744,
-  mode: 'bypass',
-  bypassChina: true,
-  bypassLAN: true,
-  customCIDR: []
+  enabled: true, proxyHost: '10.9.1.1', proxyPort: 1744,
+  bypassChina: true, bypassLAN: true, customCIDR: []
 };
 
-// Load current settings into form
 async function load() {
-  const s = await chrome.storage.local.get(DEFAULTS);
-  const settings = { ...DEFAULTS, ...s };
+  let s = await chrome.storage.local.get(DEFAULTS);
+  let settings = { ...DEFAULTS, ...s };
 
   document.getElementById('enabled').checked = settings.enabled;
   document.getElementById('proxyHost').value = settings.proxyHost;
@@ -21,51 +15,39 @@ async function load() {
   document.getElementById('bypassChina').checked = settings.bypassChina;
   document.getElementById('bypassLAN').checked = settings.bypassLAN;
   document.getElementById('customCIDR').value = (settings.customCIDR || []).join('\n');
-
-  updateStatus(settings.enabled);
+  updateStatusUI(settings.online !== false);
 }
 
-function updateStatus(enabled) {
-  const el = document.getElementById('status');
-  if (enabled) {
-    el.textContent = 'ON';
-    el.className = 'on';
-  } else {
-    el.textContent = 'OFF';
-    el.className = 'off';
-  }
+function updateStatusUI(on) {
+  let dot = document.getElementById('dot');
+  let text = document.getElementById('statusText');
+  dot.className = 'status-dot ' + (on ? 'online' : 'offline');
+  text.textContent = on ? 'Online' : 'Offline';
 }
 
-// Save settings and apply
 async function save() {
-  const customCIDR = document.getElementById('customCIDR').value
-    .split('\n')
-    .map(l => l.trim())
-    .filter(l => l && l.includes('/'));
-
-  const settings = {
+  let settings = {
     enabled: document.getElementById('enabled').checked,
     proxyHost: document.getElementById('proxyHost').value || '10.9.1.1',
     proxyPort: parseInt(document.getElementById('proxyPort').value) || 1744,
-    mode: 'bypass',
     bypassChina: document.getElementById('bypassChina').checked,
     bypassLAN: document.getElementById('bypassLAN').checked,
-    customCIDR: customCIDR
+    customCIDR: document.getElementById('customCIDR').value.split('\n').map(s => s.trim()).filter(s => s)
   };
-
   await chrome.storage.local.set(settings);
-  updateStatus(settings.enabled);
+  updateStatusUI(true);
 
-  // Visual feedback
-  const btn = document.getElementById('save');
+  let btn = document.getElementById('save');
   btn.textContent = 'Applied!';
-  setTimeout(() => { btn.textContent = 'Apply'; }, 1000);
+  setTimeout(() => { btn.textContent = 'Apply Settings'; }, 1200);
 }
 
-// Real-time toggle
-document.getElementById('enabled').addEventListener('change', async () => {
-  await save();
-});
-
+document.getElementById('enabled').addEventListener('change', save);
 document.getElementById('save').addEventListener('click', save);
-document.addEventListener('DOMContentLoaded', load);
+document.addEventListener('DOMContentLoaded', async () => {
+  await load();
+  // Check real-time status from background
+  chrome.runtime.sendMessage('status', (r) => {
+    if (r) updateStatusUI(r.online);
+  });
+});
