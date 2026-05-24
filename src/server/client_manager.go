@@ -134,7 +134,45 @@ func (cm *ClientManager) GetNetwork() string {
 	return cm.config.Network
 }
 
+// GetClients returns all configured clients.
+func (cm *ClientManager) GetClients() []ClientConfig {
+	cm.mu.RLock()
+	defer cm.mu.RUnlock()
+	if cm.config == nil {
+		return nil
+	}
+	return cm.config.Clients
+}
+
+// SaveClients writes client configurations to disk and reloads.
+func (cm *ClientManager) SaveClients(path string, clients []ClientConfig, network string) error {
+	cfg := ClientsConfig{
+		Clients:       clients,
+		Network:       network,
+		NextDynamicIP: 50,
+	}
+	if cm.config != nil {
+		cfg.NextDynamicIP = cm.config.NextDynamicIP
+	}
+	if cfg.Network == "" {
+		cfg.Network = "10.9.1.0/24"
+	}
+
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		return err
+	}
+
+	return cm.LoadClients(path)
+}
+
 // Reload reloads the client configuration from disk
 func (cm *ClientManager) Reload(path string) error {
 	return cm.LoadClients(path)
 }
+
+// ClientsConfig exported for admin API use — reuse existing type.

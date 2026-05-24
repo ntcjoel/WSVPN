@@ -5,6 +5,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"sync/atomic"
 	"time"
 
@@ -47,9 +48,11 @@ func onReady() {
 	guiDiscItem.Hide()
 
 	systray.AddSeparator()
+	settingsItem := systray.AddMenuItem("Settings...", "Edit configuration file")
+	reloadItem := systray.AddMenuItem("Reload Config", "Reconnect with new settings")
+	systray.AddSeparator()
 	quitItem := systray.AddMenuItem("Exit", "Quit WSVPN")
 
-	// Connect/Disconnect handlers
 	go func() {
 		for range guiConnItem.ClickedCh {
 			if atomic.LoadInt32(&guiConnected) == 0 {
@@ -62,6 +65,20 @@ func onReady() {
 			if client != nil {
 				client.stop()
 			}
+		}
+	}()
+	go func() {
+		for range settingsItem.ClickedCh {
+			openConfigEditor()
+		}
+	}()
+	go func() {
+		for range reloadItem.ClickedCh {
+			if client != nil {
+				client.stop()
+				time.Sleep(1 * time.Second)
+			}
+			go guiConnectLoop()
 		}
 	}()
 	go func() {
@@ -79,6 +96,12 @@ func onExit() {
 		client.stop()
 	}
 	<-guiDone
+}
+
+func openConfigEditor() {
+	cfgPath := findConfig()
+	// Use Notepad to edit the config — the simplest cross-version approach
+	exec.Command("notepad.exe", cfgPath).Start()
 }
 
 func guiConnectLoop() {

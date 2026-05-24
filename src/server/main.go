@@ -623,6 +623,9 @@ func main() {
 			http.HandleFunc("/ws/", server.handleWebSocket)
 			http.HandleFunc("/ws/health", server.HandleHealth)
 			http.HandleFunc("/ws/reload", server.HandleConfigReload)
+			http.HandleFunc("/ws/admin", server.HandleAdmin)
+			http.HandleFunc("/ws/admin/", server.HandleAdmin)
+			http.HandleFunc("/ws/admin/api/", server.HandleAdminAPI)
 
 			structuredLog.Info("websocket_start", "WebSocket server listening", map[string]interface{}{
 				"addr": wsAddr,
