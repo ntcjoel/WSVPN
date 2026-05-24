@@ -151,7 +151,7 @@ func (c *Client) initTUN() error {
 	// Overhead: header(4) + max_padding(500) + WS_frame(10) + TLS_record(29) = 543.
 	// 1500 - 543 = 957. With smart ACK padding, 1200 is safe for the common case.
 	if c.config.Obfuscation {
-		tunMTU := 1200
+		tunMTU := 1300
 		if err := netlink.LinkSetMTU(link, tunMTU); err != nil {
 			structuredLog.Warn("tun_mtu", "Failed to set TUN MTU", nil)
 		}

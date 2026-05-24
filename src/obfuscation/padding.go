@@ -15,7 +15,7 @@ const paddingHeaderLen = 4
 // AddPadding wraps packet with randomized header + random padding.
 // Format: [uint16_be(len)][2 random bytes][original_packet][random_padding]
 func AddPadding(packet []byte) []byte {
-	paddingLen := 50 + mrand.Intn(451)
+	paddingLen := 50 + mrand.Intn(451) // 50-500 bytes
 
 	result := make([]byte, paddingHeaderLen+len(packet)+paddingLen)
 

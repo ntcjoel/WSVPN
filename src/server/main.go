@@ -574,7 +574,7 @@ func main() {
 	// Auto-adjust TUN MTU when obfuscation is enabled (avoids outer-layer fragmentation)
 	tunMTU := 1500
 	if config.Obfuscation {
-		tunMTU = 1200
+		tunMTU = 1300
 		if err := netlink.LinkSetMTU(link, tunMTU); err != nil {
 			structuredLog.Warn("tun_mtu", "Failed to set TUN MTU", map[string]interface{}{"error": err.Error()})
 		}
