@@ -471,11 +471,9 @@ func main() {
 
 	// Parse command-line flags
 	configPath := flag.String("config", "server.json", "Path to server configuration file")
-	clientsPath := flag.String("clients", "", "Path to clients configuration file (overrides config file)")
 	version := flag.Bool("version", false, "Print version and exit")
 	flag.Parse()
 
-	// Print version if requested
 	if *version {
 		fmt.Printf("WSVPN Server %s\n", Version)
 		fmt.Printf("  Go Version: %s\n", runtime.Version())
@@ -483,16 +481,10 @@ func main() {
 		os.Exit(0)
 	}
 
-	// Load configuration
 	config, err := loadConfig(*configPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to load config: %v\n", err)
 		os.Exit(1)
-	}
-
-	// Override clients file if specified via flag
-	if *clientsPath != "" {
-		config.ClientsFile = *clientsPath
 	}
 
 	// Set default log directory if not specified

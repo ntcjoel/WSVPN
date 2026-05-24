@@ -7,7 +7,6 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"log"
 	"net"
@@ -145,86 +144,74 @@ const Version = "v1.2"
 func showHelp() {
 	fmt.Println("WSVPN Windows Client " + Version)
 	fmt.Println("")
-	fmt.Println("Usage: wsvpn-client.exe <command> [options]")
-	fmt.Println("")
-	fmt.Println("Commands:")
-	fmt.Println("  connect     Start VPN connection")
-	fmt.Println("  disconnect  Stop VPN connection")
-	fmt.Println("  status      Show connection status")
-	fmt.Println("  version     Show version info")
-	fmt.Println("  help        Show this help message")
-	fmt.Println("")
-	fmt.Println("Options:")
-	fmt.Println("  -h, --help     Show help for command")
-	fmt.Println("  --config       Config file path (default: client-windows.json)")
-	fmt.Println("")
-	fmt.Println("Examples:")
-	fmt.Println("  wsvpn-client.exe connect --config client.json")
-	fmt.Println("  wsvpn-client.exe disconnect")
-	fmt.Println("  wsvpn-client.exe status")
-	fmt.Println("  wsvpn-client.exe -h")
+	fmt.Println("Usage:")
+	fmt.Println("  wsvpn-client.exe              Start VPN (default)")
+	fmt.Println("  wsvpn-client.exe -config F    Start with config file")
+	fmt.Println("  wsvpn-client.exe disconnect   Stop VPN")
+	fmt.Println("  wsvpn-client.exe -version     Show version")
+	fmt.Println("  wsvpn-client.exe -help        Show this help")
 }
 
 func main() {
-	if len(os.Args) < 2 {
-		showHelp()
-		os.Exit(1)
+	cmd := "connect"
+	if len(os.Args) > 1 {
+		cmd = os.Args[1]
 	}
 
-	cmd := os.Args[1]
-
-	// Check for global help flag
-	if cmd == "-h" || cmd == "--help" || cmd == "help" {
+	// Global flags
+	if cmd == "-h" || cmd == "--help" || cmd == "-help" || cmd == "help" {
 		showHelp()
 		os.Exit(0)
 	}
+	if cmd == "-version" || cmd == "--version" || cmd == "version" {
+		versionCmd()
+		return
+	}
 
 	switch cmd {
-	case "connect":
+	case "connect", "-config":
 		connectCmd()
 	case "disconnect":
 		disconnectCmd()
-	case "status":
-		statusCmd()
-	case "version":
-		versionCmd()
 	default:
-		fmt.Printf("Unknown command: %s\n", cmd)
-		fmt.Println("Run 'wsvpn-client.exe help' for usage.")
-		os.Exit(1)
+		// Treat unknown arg as config file path
+		os.Setenv("WSVPN_CONFIG", os.Args[1])
+		connectCmd()
 	}
 }
 
 var client *Client
 
-func showConnectHelp() {
-	fmt.Println("WSVPN Windows Client " + Version)
-	fmt.Println("")
-	fmt.Println("Usage: wsvpn-client.exe connect [options]")
-	fmt.Println("")
-	fmt.Println("Options:")
-	fmt.Println("  --config       Config file path (default: client-windows.json)")
-	fmt.Println("  -h, --help     Show this help message")
-	fmt.Println("")
-	fmt.Println("Examples:")
-	fmt.Println("  wsvpn-client.exe connect --config client.json")
-	fmt.Println("  wsvpn-client.exe connect")
+func findConfig() string {
+	// Try common paths
+	paths := []string{"client.json", "client-windows.json"}
+	for _, p := range paths {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	// Try next to exe
+	if exe, err := os.Executable(); err == nil {
+		dir := filepath.Dir(exe)
+		for _, p := range paths {
+			fp := filepath.Join(dir, p)
+			if _, err := os.Stat(fp); err == nil {
+				return fp
+			}
+		}
+	}
+	return "client.json"
 }
 
 func connectCmd() {
-	// Create a new FlagSet for connect command
-	fs := flag.NewFlagSet("connect", flag.ExitOnError)
-	cfgPath := fs.String("config", "client-windows.json", "config file path")
-	showHelp := fs.Bool("help", false, "Show help")
-	showHelpShort := fs.Bool("h", false, "Show help")
-	
-	// Parse args after "connect" command
-	fs.Parse(os.Args[2:])
+	cfgPath := findConfig()
 
-	// Check for help flag
-	if *showHelp || *showHelpShort {
-		showConnectHelp()
-		os.Exit(0)
+	// Parse -config flag if provided
+	for i, a := range os.Args {
+		if (a == "-config" || a == "--config") && i+1 < len(os.Args) {
+			cfgPath = os.Args[i+1]
+		}
+	}
 	}
 
 	// Load Wintun driver first
@@ -234,7 +221,7 @@ func connectCmd() {
 	defer wintunDLL.Release()
 
 	// Load configuration
-	cfg, err := loadConfig(*cfgPath)
+	cfg, err := loadConfig(cfgPath)
 	if err != nil {
 		log.Fatalf("Config error: %v", err)
 	}

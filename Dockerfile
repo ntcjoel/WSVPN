@@ -30,4 +30,4 @@ RUN chmod +x /wsvpn-server
 RUN mkdir -p /var/log/wsvpn/server /config
 
 EXPOSE 8180
-ENTRYPOINT ["/wsvpn-server", "-config", "/config/server.json", "-clients", "/config/clients.json"]
+ENTRYPOINT ["/wsvpn-server", "-config", "/config/server.json"]

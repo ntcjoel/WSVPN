@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io"
 	mrand "math/rand"
@@ -792,21 +791,28 @@ func main() {
 	// Initialize obfuscation with secure random seed
 	obfuscation.InitObfuscation()
 
-	// Parse command-line flags
-	configPath := flag.String("config", "client.json", "Path to client configuration file")
-	version := flag.Bool("version", false, "Print version and exit")
-	flag.Parse()
-
-	// Print version if requested
-	if *version {
-		fmt.Printf("WSVPN Client %s\n", Version)
-		fmt.Printf("  Go Version: %s\n", runtime.Version())
-		fmt.Printf("  OS/Arch: %s/%s\n", runtime.GOOS, runtime.GOARCH)
+	// Parse flags — minimal: -config (default auto-discovery), -version, -help
+	cfgFile := "client.json"
+	showVersion := false
+	for i, a := range os.Args[1:] {
+		switch a {
+		case "-config", "--config":
+			if i+2 < len(os.Args) {
+				cfgFile = os.Args[i+2]
+			}
+		case "-version", "--version":
+			showVersion = true
+		case "-h", "-help", "--help":
+			fmt.Printf("WSVPN Client %s\n\nUsage: wsvpn-client [-config file] [-version]\n", Version)
+			os.Exit(0)
+		}
+	}
+	if showVersion {
+		fmt.Printf("WSVPN Client %s\n  Go: %s\n  OS: %s/%s\n", Version, runtime.Version(), runtime.GOOS, runtime.GOARCH)
 		os.Exit(0)
 	}
 
-	// Load configuration
-	config, err := loadConfig(*configPath)
+	config, err := loadConfig(cfgFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to load config: %v\n", err)
 		os.Exit(1)
