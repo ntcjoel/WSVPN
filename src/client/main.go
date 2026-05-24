@@ -228,17 +228,25 @@ func (c *Client) connectWebSocket() error {
 	connectAddr := net.JoinHostPort(connectHost, port)
 	realAddr := net.JoinHostPort(realHost, port)
 
-	// Use ws:// scheme so gorilla doesn't do TLS; uTLS handles it in NetDial.
+	// Use ws:// scheme so gorilla doesn't do TLS; uTLS handles it in NetDial when using WSS.
 	// URL uses the REAL host for the Host header; TCP+TLS goes to the front domain.
-	wsURL := fmt.Sprintf("ws://%s/ws/%s", realAddr, c.config.UUID)
+	scheme := "ws"
+	if u.Scheme == "wss" {
+		scheme = "ws" // gorilla doesn't do TLS
+	}
+	wsURL := fmt.Sprintf("%s://%s/ws/%s", scheme, realAddr, c.config.UUID)
 
 	dialer := websocket.Dialer{
 		HandshakeTimeout: 10 * time.Second,
 		NetDial: func(network, addr string) (net.Conn, error) {
-			// Ignore addr; connect to front domain or real server
 			tcpConn, err := net.DialTimeout(network, connectAddr, 10*time.Second)
 			if err != nil {
 				return nil, err
+			}
+
+			// If not WSS, return plain TCP (for local testing without TLS)
+			if u.Scheme != "wss" {
+				return tcpConn, nil
 			}
 
 			// Perform uTLS handshake with SNI = front/connect domain
