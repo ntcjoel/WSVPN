@@ -15,7 +15,7 @@ const paddingHeaderLen = 4
 // AddPadding wraps packet with randomized header + random padding.
 // Format: [uint16_be(len)][2 random bytes][original_packet][random_padding]
 func AddPadding(packet []byte) []byte {
-	paddingLen := 50 + mrand.Intn(451) // 50-500 bytes
+	paddingLen := 20 + mrand.Intn(181) // 20-200 bytes
 
 	result := make([]byte, paddingHeaderLen+len(packet)+paddingLen)
 
@@ -105,8 +105,18 @@ func SimulateHTTPSPattern(packet []byte) []byte {
 		copy(result[paddingHeaderLen:], packet)
 		return result
 	}
+	// Bias target sizes toward the packet's natural size to minimize padding waste.
+	// Large data packets (>800B) should target 1480, not 64.
 	sizes := []int{64, 256, 1024, 1480}
-	weights := []float64{0.20, 0.30, 0.25, 0.25}
+	var weights []float64
+	switch {
+	case len(packet) > 800:
+		weights = []float64{0.05, 0.10, 0.25, 0.60}
+	case len(packet) > 300:
+		weights = []float64{0.10, 0.15, 0.50, 0.25}
+	default:
+		weights = []float64{0.20, 0.30, 0.25, 0.25}
+	}
 
 	targetSize := weightedRandomSize(sizes, weights)
 
