@@ -3,7 +3,12 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
+	_ "embed"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"sync/atomic"
@@ -15,14 +20,8 @@ import (
 	"wsvpn/obfuscation"
 )
 
-// MessageBox calls the Windows MessageBoxW API.
-func MessageBox(hwnd uintptr, text, caption string, flags uint) int {
-	u32, _ := syscall.UTF16PtrFromString(text)
-	u16c, _ := syscall.UTF16PtrFromString(caption)
-	ret, _, _ := syscall.NewLazyDLL("user32.dll").NewProc("MessageBoxW").Call(
-		hwnd, uintptr(unsafe.Pointer(u32)), uintptr(unsafe.Pointer(u16c)), uintptr(flags))
-	return int(ret)
-}
+//go:embed config.html
+var configFormHTML string
 
 var (
 	guiConnected  int32
@@ -31,30 +30,27 @@ var (
 	guiStatusItem *systray.MenuItem
 	guiConnItem   *systray.MenuItem
 	guiDiscItem   *systray.MenuItem
+	guiCfgPath    string
+	guiSrv        *http.Server
 )
 
-func showError(title, msg string) {
-	MessageBox(0, msg, title, 0x10) // MB_ICONERROR
+func MessageBox(hwnd uintptr, text, caption string, flags uint) int {
+	u32, _ := syscall.UTF16PtrFromString(text)
+	u16c, _ := syscall.UTF16PtrFromString(caption)
+	ret, _, _ := syscall.NewLazyDLL("user32.dll").NewProc("MessageBoxW").Call(
+		hwnd, uintptr(unsafe.Pointer(u32)), uintptr(unsafe.Pointer(u16c)), uintptr(flags))
+	return int(ret)
 }
 
 func runGUI(cfgPath string) {
-	cfg, err := loadConfig(cfgPath)
-	if err != nil {
-		showError("WSVPN", fmt.Sprintf("Cannot load config:\n%s\n\nPlace client.json next to wsvpn-client-gui.exe", cfgPath))
-		os.Exit(1)
-	}
-	if cfg.ServerURL == "" {
-		showError("WSVPN", "server_url is not set in client.json\n\nRight-click tray icon → Settings to configure.")
-		os.Exit(1)
-	}
-	if cfg.UUID == "" {
-		showError("WSVPN", "uuid is not set in client.json\n\nRight-click tray icon → Settings to configure.")
-		os.Exit(1)
-	}
-
-	client = &Client{cfg: cfg}
+	guiCfgPath = cfgPath
 	guiStopCh = make(chan struct{})
 	guiDone = make(chan struct{})
+
+	// First run with no config? Open web setup
+	if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
+		openConfigWeb()
+	}
 
 	systray.Run(onReady, onExit)
 }
@@ -71,7 +67,7 @@ func onReady() {
 	guiDiscItem.Hide()
 
 	systray.AddSeparator()
-	settingsItem := systray.AddMenuItem("Settings...", "Edit configuration file")
+	settingsItem := systray.AddMenuItem("Settings...", "Configure VPN")
 	reloadItem := systray.AddMenuItem("Reload Config", "Reconnect with new settings")
 	systray.AddSeparator()
 	quitItem := systray.AddMenuItem("Exit", "Quit WSVPN")
@@ -92,7 +88,7 @@ func onReady() {
 	}()
 	go func() {
 		for range settingsItem.ClickedCh {
-			openConfigEditor()
+			openConfigWeb()
 		}
 	}()
 	go func() {
@@ -109,22 +105,92 @@ func onReady() {
 		systray.Quit()
 	}()
 
-	// Auto-connect on start
-	go guiConnectLoop()
+	// Auto-connect if config exists
+	if client == nil {
+		cfg, err := loadConfig(guiCfgPath)
+		if err == nil && cfg.ServerURL != "" && cfg.UUID != "" {
+			client = &Client{cfg: cfg}
+			go guiConnectLoop()
+		}
+	}
 }
 
 func onExit() {
 	close(guiStopCh)
+	if guiSrv != nil {
+		guiSrv.Shutdown(context.Background())
+	}
 	if client != nil {
 		client.stop()
 	}
 	<-guiDone
 }
 
-func openConfigEditor() {
-	cfgPath := findConfig()
-	// Use Notepad to edit the config — the simplest cross-version approach
-	exec.Command("notepad.exe", cfgPath).Start()
+func openConfigWeb() {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	ln.Close()
+
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/config", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		cfg, err := loadConfig(guiCfgPath)
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]string{})
+			return
+		}
+		json.NewEncoder(w).Encode(cfg)
+	})
+
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write([]byte(configFormHTML))
+	})
+
+	mux.HandleFunc("/save", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var cfg Config
+		if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+			http.Error(w, "Invalid JSON", http.StatusBadRequest)
+			return
+		}
+		data, err := json.MarshalIndent(cfg, "", "  ")
+		if err != nil {
+			http.Error(w, "Marshal error", http.StatusInternalServerError)
+			return
+		}
+		if err := os.WriteFile(guiCfgPath, data, 0644); err != nil {
+			http.Error(w, "Write error: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		go func() {
+			if client != nil {
+				client.stop()
+				time.Sleep(1 * time.Second)
+			}
+			client = &Client{cfg: &cfg}
+			go guiConnectLoop()
+		}()
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK"))
+	})
+
+	guiSrv = &http.Server{Addr: fmt.Sprintf("127.0.0.1:%d", port), Handler: mux}
+	go guiSrv.ListenAndServe()
+
+	url := fmt.Sprintf("http://127.0.0.1:%d", port)
+	exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
 }
 
 func guiConnectLoop() {
@@ -138,7 +204,12 @@ func guiConnectLoop() {
 		}
 
 		if atomic.LoadInt32(&guiConnected) == 1 {
-			return // already connected
+			return
+		}
+
+		if client == nil || client.cfg == nil {
+			time.Sleep(3 * time.Second)
+			continue
 		}
 
 		client.running = true
