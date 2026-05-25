@@ -1,6 +1,6 @@
 # WSVPN — WebSocket VPN
 
-**Version:** v1.2 &nbsp;|&nbsp; **License:** MIT &nbsp;|&nbsp; [Download](https://github.com/ntcjoel/WSVPN/releases)
+**Version:** v1.2  &nbsp;|&nbsp;  **License:** MIT  &nbsp;|&nbsp;  [Download](https://github.com/ntcjoel/WSVPN/releases)
 
 ---
 
@@ -223,15 +223,19 @@ wsvpn-client.exe -version
 
 ### Windows GUI
 
-Double-click `wsvpn-client-gui.exe` — a tray icon appears in the taskbar.
+Double-click `wsvpn-client-gui.exe`.
 
-Right-click the icon:
+**First run** — No config file found: a browser opens with a setup page. Fill in your server URL, UUID, and client IP. Click "Save and Connect" — the config is saved and VPN starts automatically.
+
+**Subsequent runs** — Config found: connects immediately. Tray icon appears in the taskbar.
+
+Right-click the tray icon:
 - **Connect** / **Disconnect** — Start or stop VPN
-- **Settings...** — Opens `client.json` in Notepad for editing
+- **Settings...** — Re-open the setup page in browser
 - **Reload Config** — Reconnects with updated settings
 - **Exit** — Quit
 
-Mouse over the icon to see connection status.
+No JSON editing required — everything is configured through the web UI.
 
 ### Client Configuration
 
