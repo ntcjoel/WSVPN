@@ -1,17 +1,5 @@
 {
-  "name": "wsvpn-client",
-  "client_ip": "10.9.1.2",
   "server_url": "wss://your-domain.com",
   "uuid": "device-phone-001",
-  "reconnect": true,
-  "log_level": "info",
-  "obfuscation": true,
-  "transport": "websocket",
-  "quic_sni": "your-domain.com",
-  "tls_fingerprint": "chrome",
-  "traffic_shape": "off",
-  "front_domain": "",
-  "dispersion_peers": [],
-  "traffic_induction": false,
-  "induction_domains": []
+  "client_ip": "10.9.1.2"
 }

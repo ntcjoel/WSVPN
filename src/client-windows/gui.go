@@ -7,11 +7,22 @@ import (
 	"os"
 	"os/exec"
 	"sync/atomic"
+	"syscall"
 	"time"
+	"unsafe"
 
 	"github.com/getlantern/systray"
 	"wsvpn/obfuscation"
 )
+
+// MessageBox calls the Windows MessageBoxW API.
+func MessageBox(hwnd uintptr, text, caption string, flags uint) int {
+	u32, _ := syscall.UTF16PtrFromString(text)
+	u16c, _ := syscall.UTF16PtrFromString(caption)
+	ret, _, _ := syscall.NewLazyDLL("user32.dll").NewProc("MessageBoxW").Call(
+		hwnd, uintptr(unsafe.Pointer(u32)), uintptr(unsafe.Pointer(u16c)), uintptr(flags))
+	return int(ret)
+}
 
 var (
 	guiConnected  int32
@@ -22,10 +33,22 @@ var (
 	guiDiscItem   *systray.MenuItem
 )
 
+func showError(title, msg string) {
+	MessageBox(0, msg, title, 0x10) // MB_ICONERROR
+}
+
 func runGUI(cfgPath string) {
 	cfg, err := loadConfig(cfgPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Config error: %v\n", err)
+		showError("WSVPN", fmt.Sprintf("Cannot load config:\n%s\n\nPlace client.json next to wsvpn-client-gui.exe", cfgPath))
+		os.Exit(1)
+	}
+	if cfg.ServerURL == "" {
+		showError("WSVPN", "server_url is not set in client.json\n\nRight-click tray icon → Settings to configure.")
+		os.Exit(1)
+	}
+	if cfg.UUID == "" {
+		showError("WSVPN", "uuid is not set in client.json\n\nRight-click tray icon → Settings to configure.")
 		os.Exit(1)
 	}
 

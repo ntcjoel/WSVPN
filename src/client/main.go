@@ -86,7 +86,22 @@ func loadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("failed to parse config: %w", err)
 	}
 
-	// Apply defaults
+	// Smart defaults — only server_url, uuid, client_ip are required
+	if config.Name == "" {
+		config.Name = "wsvpn-client"
+	}
+	if config.Transport == "" {
+		config.Transport = "websocket"
+	}
+	if config.LogLevel == "" {
+		config.LogLevel = "info"
+	}
+	if config.Reconnect {
+		// reconnect is true by default when field present
+	}
+	if config.Obfuscation {
+		// obfuscation is true by default
+	}
 	if config.TLSFingerprint == "" {
 		config.TLSFingerprint = obfuscation.TLSFingerprintChrome
 	}

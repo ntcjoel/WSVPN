@@ -232,9 +232,24 @@ func connectCmd() {
 		log.Fatalf("Config error: %v", err)
 	}
 
-	// Validate and normalize obfuscation setting (default: "on")
+	// Smart defaults — only server_url, uuid, client_ip are required
+	if cfg.Name == "" {
+		cfg.Name = "wsc"
+	}
+	if cfg.Transport == "" {
+		cfg.Transport = "websocket"
+	}
+	if cfg.LogLevel == "" {
+		cfg.LogLevel = "info"
+	}
 	if cfg.Obfuscation == "" {
 		cfg.Obfuscation = "on"
+	}
+	if cfg.TLSFingerprint == "" {
+		cfg.TLSFingerprint = obfuscation.TLSFingerprintChrome
+	}
+	if cfg.TrafficShape == "" {
+		cfg.TrafficShape = "off"
 	}
 	obfuscationEnabled := (cfg.Obfuscation == "on" || cfg.Obfuscation == "true" || cfg.Obfuscation == "1")
 	log.Printf("Obfuscation: %s", cfg.Obfuscation)

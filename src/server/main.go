@@ -487,17 +487,28 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Set default log directory if not specified
+	// Smart defaults — only network, server_ip, admin_token are required
+	if config.Name == "" {
+		config.Name = "wsvpn0"
+	}
+	if config.ListenAddr == "" {
+		config.ListenAddr = ":8180"
+	}
+	if config.WebSocketPath == "" {
+		config.WebSocketPath = "/ws/"
+	}
+	if config.ClientsFile == "" {
+		config.ClientsFile = "clients.json"
+	}
+	if config.LogLevel == "" {
+		config.LogLevel = "info"
+	}
 	if config.LogDir == "" {
 		config.LogDir = "/var/log/wsvpn/server"
 	}
-
-	// Set default transport to websocket for backward compatibility
 	if config.Transport == "" {
 		config.Transport = "websocket"
 	}
-
-	// Set default SOCKS5 port
 	if config.SOCKS5Port == 0 {
 		config.SOCKS5Port = 1744
 	}
