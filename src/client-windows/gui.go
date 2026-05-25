@@ -23,7 +23,7 @@ import (
 //go:embed config.html
 var configFormHTML string
 
-//go:embed icon128.png
+//go:embed icon48.png
 var trayIconBytes []byte
 
 var (
@@ -178,12 +178,18 @@ func openConfigWeb() {
 			http.Error(w, "Write error: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
+		// Reload config to apply defaults for fields not in the form
+		savedCfg, err := loadConfig(guiCfgPath)
+		if err != nil {
+			http.Error(w, "Reload error: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 		go func() {
 			if client != nil {
 				client.stop()
 				time.Sleep(1 * time.Second)
 			}
-			client = &Client{cfg: &cfg}
+			client = &Client{cfg: savedCfg}
 			go guiConnectLoop()
 		}()
 		w.WriteHeader(http.StatusOK)
