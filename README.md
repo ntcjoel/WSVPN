@@ -145,28 +145,32 @@ server {
 
 ### Server Configuration
 
+Only 4 fields are required. All others use sensible defaults.
+
 ```json
 {
-  "name": "wsvpn0",
-  "network": "10.9.1.0/24",
-  "server_ip": "10.9.1.1",
-  "listen_addr": ":8180",
-  "websocket_path": "/ws/",
-  "clients_file": "clients.json",
-  "log_level": "info",
-  "obfuscation": true,
-  "socks5_enabled": true,
-  "socks5_port": 1744,
-  "admin_token": "your-32-char-random-token-here"
+  "network":     "10.9.1.0/24",
+  "server_ip":   "10.9.1.1",
+  "admin_token": "your-32-char-random-token-here",
+  "obfuscation": true
 }
 ```
 
+Full options (all optional):
+
 | Field | Default | Description |
 |-------|---------|-------------|
-| `obfuscation` | `true` | Enable packet obfuscation |
-| `socks5_enabled` | `true` | Built-in SOCKS5 proxy on VPN IP |
-| `socks5_port` | `1744` | SOCKS5 proxy port |
-| `admin_token` | — | Auth for `/ws/health`, `/ws/admin`, `/ws/reload` |
+| `network` | — | VPN subnet CIDR *(required)* |
+| `server_ip` | — | Server VPN IP *(required)* |
+| `admin_token` | — | Auth token *(required)* |
+| `obfuscation` | — | Enable packet obfuscation |
+| `name` | `wsvpn0` | TUN interface name |
+| `listen_addr` | `:8180` | Listen address |
+| `websocket_path` | `/ws/` | WebSocket URL path |
+| `clients_file` | `clients.json` | Clients config path |
+| `log_level` | `info` | Log level |
+| `socks5_enabled` | `true` | SOCKS5 on VPN IP |
+| `socks5_port` | `1744` | SOCKS5 listen port |
 
 ### Clients Configuration (`clients.json`)
 
@@ -233,34 +237,30 @@ Mouse over the icon to see connection status.
 
 ```json
 {
-  "name": "wsvpn-client",
-  "client_ip": "10.9.1.2",
   "server_url": "wss://your-domain.com",
-  "uuid": "my-phone-001",
-  "reconnect": true,
-  "log_level": "info",
-  "obfuscation": true,
-  "transport": "websocket",
-  "tls_fingerprint": "chrome",
-  "traffic_shape": "off",
-  "front_domain": "",
-  "dispersion_peers": [],
-  "traffic_induction": false,
-  "induction_domains": []
+  "uuid": "device-phone-001",
+  "client_ip": "10.9.1.2",
+  "obfuscation": true
 }
 ```
 
+Full options (all optional):
+
 | Field | Default | Description |
 |-------|---------|-------------|
-| `server_url` | — | Server address (`wss://domain` or `ws://ip:port`) |
-| `uuid` | — | Must match an entry in server's `clients.json` |
-| `client_ip` | — | Must match the IP assigned in `clients.json` |
-| `obfuscation` | `true` | Enable packet obfuscation |
-| `tls_fingerprint` | `chrome` | `chrome` / `firefox` / `ios` / `edge` / `random` |
-| `traffic_shape` | `off` | `off` / `jitter` / `browse` / `adaptive` |
+| `server_url` | — | Server URL *(required)* |
+| `uuid` | — | Client UUID *(required)* |
+| `client_ip` | — | VPN IP *(required)* |
+| `obfuscation` | — | Enable packet obfuscation |
+| `name` | `wsvpn-client` | TUN interface name |
+| `log_level` | `info` | Log level |
+| `transport` | `websocket` | Transport protocol |
+| `tls_fingerprint` | `chrome` | chrome/firefox/ios/edge/random |
+| `traffic_shape` | `off` | off/jitter/browse/adaptive |
+| `reconnect` | `false` | Auto-reconnect on disconnect |
 | `front_domain` | `""` | CDN domain for domain fronting |
-| `dispersion_peers` | `[]` | Extra server URLs for traffic dispersion |
-| `traffic_induction` | `false` | Background HTTP noise during idle |
+| `dispersion_peers` | `[]` | Extra server URLs for dispersion |
+| `traffic_induction` | `false` | Background HTTP noise |
 
 ---
 
