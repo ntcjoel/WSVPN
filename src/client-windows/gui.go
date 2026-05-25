@@ -23,6 +23,9 @@ import (
 //go:embed config.html
 var configFormHTML string
 
+//go:embed icon128.png
+var trayIconBytes []byte
+
 var (
 	guiConnected  int32
 	guiStopCh     chan struct{}
@@ -56,6 +59,7 @@ func runGUI(cfgPath string) {
 }
 
 func onReady() {
+	systray.SetIcon(trayIconBytes)
 	systray.SetTooltip("WSVPN — disconnected")
 
 	guiStatusItem = systray.AddMenuItem("Disconnected", "")
