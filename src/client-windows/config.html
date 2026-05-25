@@ -52,7 +52,7 @@ input:focus,select:focus{border-color:#22b43c;outline:none;box-shadow:0 0 0 2px 
 
 <div class="row">
 <div><label>Reconnect</label><select id="reconnect"><option value="true" selected>Yes</option><option value="false">No</option></select></div>
-<div><label>Obfuscation</label><select id="obfuscation"><option value="true" selected>On</option><option value="false">Off</option></select></div>
+<div><label>Obfuscation</label><select id="obfuscation"><option value="on" selected>On</option><option value="off">Off</option></select></div>
 </div>
 
 <div class="row">
@@ -92,7 +92,7 @@ document.getElementById('f').addEventListener('submit', async (e) => {
     tls_fingerprint: document.getElementById('tls_fingerprint').value,
     traffic_shape: document.getElementById('traffic_shape').value,
     reconnect: document.getElementById('reconnect').value === 'true',
-    obfuscation: document.getElementById('obfuscation').value === 'true',
+    obfuscation: document.getElementById('obfuscation').value,
     traffic_induction: document.getElementById('traffic_induction').value === 'true',
     log_level: document.getElementById('log_level').value,
     front_domain: '',
