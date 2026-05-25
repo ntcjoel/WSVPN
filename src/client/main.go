@@ -41,7 +41,7 @@ var structuredLog *logAlias
 
 // Config represents the client configuration
 type Config struct {
-	Name              string `json:"name"`
+	Name              string `json:"tunname"`
 	ClientIP          string `json:"client_ip"`
 	ServerURL         string `json:"server_url"`
 	UUID              string `json:"uuid"`

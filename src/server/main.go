@@ -37,7 +37,7 @@ type Config struct {
 	Obfuscation   bool   `json:"obfuscation"`
 	AdminToken    string `json:"admin_token"`
 	Transport     string `json:"transport"`      // websocket, quic, or both
-	SOCKS5Enabled bool   `json:"socks5_enabled"` // Built-in SOCKS5 proxy (default: true)
+	SOCKS5Enabled string `json:"socks5_enabled"` // "on" or "off" (default: "on")
 	SOCKS5Port    int    `json:"socks5_port"`    // SOCKS5 proxy port (default: 1744)
 }
 
@@ -509,6 +509,9 @@ func main() {
 	if config.Transport == "" {
 		config.Transport = "websocket"
 	}
+	if config.SOCKS5Enabled == "" {
+		config.SOCKS5Enabled = "on"
+	}
 	if config.SOCKS5Port == 0 {
 		config.SOCKS5Port = 1744
 	}
@@ -669,7 +672,7 @@ func main() {
 	// }
 
 	// Start built-in SOCKS5 proxy (enabled by default)
-	if config.SOCKS5Enabled {
+	if config.SOCKS5Enabled == "on" || config.SOCKS5Enabled == "true" || config.SOCKS5Enabled == "1" {
 		socks5Addr := net.JoinHostPort(config.ServerIP, fmt.Sprintf("%d", config.SOCKS5Port))
 		go startSOCKS5(socks5Addr)
 	} else {

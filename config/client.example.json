@@ -2,5 +2,10 @@
   "server_url": "wss://your-domain.com",
   "uuid": "device-phone-001",
   "client_ip": "10.9.1.2",
-  "obfuscation": true
+  "obfuscation": true,
+  "tunname": "wsc",
+  "tls_fingerprint": "chrome",
+  "traffic_shape": "off",
+  "reconnect": true,
+  "traffic_induction": false
 }

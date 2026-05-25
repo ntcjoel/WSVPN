@@ -2,5 +2,8 @@
   "network": "10.9.1.0/24",
   "server_ip": "10.9.1.1",
   "admin_token": "your-32-char-random-token-here",
-  "obfuscation": true
+  "obfuscation": true,
+  "websocket_path": "/ws/",
+  "socks5_enabled": true,
+  "socks5_port": 1744
 }
